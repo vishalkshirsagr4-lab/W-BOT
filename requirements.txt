@@ -1,0 +1,28 @@
+# Web Framework & Server
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+
+# Database
+motor==3.4.0
+pymongo==4.6.3
+
+# Data Validation & Settings
+pydantic==2.6.4
+pydantic-settings==2.2.1
+email-validator==2.1.1
+
+# Security & Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.9
+
+# Background Tasks & Scheduling
+APScheduler==3.10.4
+
+# AI & External Requests
+httpx==0.27.0
+google-generativeai==0.4.1 # Or openai depending on your AI choice
+
+# Utilities
+python-dotenv==1.0.1
+pytz==2024.1
