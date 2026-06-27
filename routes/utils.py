@@ -1,7 +1,7 @@
 import logging
 import httpx
 from fastapi import APIRouter, HTTPException, Query
-from app.config.settings import get_settings
+from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

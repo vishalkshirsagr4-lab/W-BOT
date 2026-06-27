@@ -2,7 +2,8 @@ import logging
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
-from app.ai.chat import generate_chat_response
+from ai.chat import generate_chat_response
+
 
 logger = logging.getLogger(__name__)
 

@@ -3,8 +3,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from typing import List
-from app.database.connection import get_db
-from app.models.games import QuizQuestionInDB
+from database.connection import get_db
+from models.games import QuizQuestionInDB
 
 logger = logging.getLogger(__name__)
 

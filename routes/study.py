@@ -2,8 +2,9 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List, Optional
 from datetime import datetime, timezone
-from app.database.connection import get_db
-from app.models.study import NoteCreate, NoteInDB, ReminderCreate, ReminderInDB
+from database.connection import get_db
+from models.study import NoteCreate, NoteInDB, ReminderCreate, ReminderInDB
+
 
 logger = logging.getLogger(__name__)
 

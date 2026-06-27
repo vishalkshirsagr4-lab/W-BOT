@@ -1,6 +1,7 @@
 import logging
 from motor.motor_asyncio import AsyncIOMotorClient
-from app.config.settings import get_settings
+from config.settings import get_settings
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)

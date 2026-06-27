@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from bson import ObjectId
-from app.database.connection import get_db
+from database.connection import get_db
 
 logger = logging.getLogger(__name__)
 

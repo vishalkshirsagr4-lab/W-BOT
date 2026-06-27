@@ -1,8 +1,9 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from datetime import datetime, timezone, timedelta
-from app.database.connection import get_db
-from app.models.user import UserCreate, UserInDB
+from database.connection import get_db
+
+from models.user import UserCreate, UserInDB
 
 logger = logging.getLogger(__name__)
 

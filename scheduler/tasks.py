@@ -1,7 +1,7 @@
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timezone
-from app.database.connection import db_instance
+from database.connection import db_instance
 
 logger = logging.getLogger(__name__)
 

@@ -1,11 +1,14 @@
-from app.routes import users
 from fastapi import FastAPI
+from routes.users import router as users_router
+from routes.chat import router as chat_router
+
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 
-from app.config.settings import get_settings
-from app.database.connection import connect_to_mongo, close_mongo_connection
+from config.settings import get_settings
+from database.connection import connect_to_mongo, close_mongo_connection
+
 
 # Load settings and configure logging
 settings = get_settings()
@@ -45,8 +48,9 @@ app.add_middleware(
 )
 
 # Register API Routers
-app.include_router(users.router, prefix="/api/v1")
-from app.routes import users, chat
+app.include_router(users_router, prefix="/api/v1")
+app.include_router(chat_router, prefix="/api/v1")
+
 
 # A simple health check route
 @app.get("/", tags=["Health"])
@@ -57,6 +61,4 @@ async def root():
         "environment": settings.ENVIRONMENT
     }
 
-# Register API Routers
-app.include_router(users.router, prefix="/api/v1")
-app.include_router(chat.router, prefix="/api/v1")
+

@@ -19,8 +19,9 @@ class UserInDB(UserBase):
     
     # Community & Progression
     join_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    is_admin: bool = default=False
-    is_banned: bool = default=False
+    is_admin: bool = Field(default=False)
+    is_banned: bool = Field(default=False)
+
     
     # Economy & Gamification
     coins: int = Field(default=100, description="Welcome bonus coins")
