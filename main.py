@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from routes.users import router as users_router
 from routes.chat import router as chat_router
+from routes.whatsapp import router as whatsapp_router
+
 
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -50,6 +52,7 @@ app.add_middleware(
 # Register API Routers
 app.include_router(users_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
+app.include_router(whatsapp_router, prefix="/api/v1")
 
 
 # A simple health check route

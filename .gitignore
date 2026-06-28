@@ -1,1 +1,110 @@
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Environment Variables
 .env
+.env.*
+
+# Logs
+logs/
+*.log
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# -----------------------------
+# Node.js
+# -----------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Package lock (optional)
+# package-lock.json
+
+# -----------------------------
+# WhatsApp Session
+# -----------------------------
+.wwebjs_auth/
+.wwebjs_cache/
+
+# QR Session
+session/
+sessions/
+
+# Puppeteer
+chrome-profile/
+
+# -----------------------------
+# MongoDB
+# -----------------------------
+dump/
+*.bson
+
+# -----------------------------
+# Uploads
+# -----------------------------
+uploads/
+temp/
+tmp/
+
+# -----------------------------
+# Cache
+# -----------------------------
+.cache/
+*.cache
+
+# -----------------------------
+# Runtime
+# -----------------------------
+*.pid
+*.seed
+*.pid.lock
+
+# -----------------------------
+# AI Models / Generated Files
+# -----------------------------
+generated/
+exports/
+reports/
+
+# -----------------------------
+# Secrets
+# -----------------------------
+credentials.json
+service-account.json
+firebase-adminsdk.json
+google-credentials.json
+
+# -----------------------------
+# Misc
+# -----------------------------
+*.sqlite3
+*.db
