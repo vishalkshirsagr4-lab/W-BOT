@@ -65,7 +65,6 @@ async def _fetch_one(db, collection: str, query: dict) -> Optional[dict]:
 
 async def _ensure_user(db, payload: WhatsAppMessagePayload, now_ts: int, text: str) -> None:
     # Root requirement: auto upsert; never require manual insertion.
-    # Also: avoid duplicate paths in $set/$setOnInsert.
     user_update = {
         "$set": {
             "platform_id": payload.platform_id,
@@ -85,7 +84,6 @@ async def _ensure_user(db, payload: WhatsAppMessagePayload, now_ts: int, text: s
         "$setOnInsert": {
             "created_at": now_ts,
             "first_seen": now_ts,
-            "message_count": 0,
         },
         "$inc": {"message_count": 1},
     }
@@ -102,7 +100,6 @@ async def _ensure_group(db, payload: WhatsAppMessagePayload, now_ts: int) -> Non
             "group_id": payload.group_id,
             "group_name": payload.group_name,
             "updated_at": now_ts,
-            "first_seen": {"$exists": False},
             "last_activity": now_ts,
             "ai_enabled": True,
             "reply_mode": "Always",
@@ -112,9 +109,6 @@ async def _ensure_group(db, payload: WhatsAppMessagePayload, now_ts: int) -> Non
             "first_seen": now_ts,
         },
     }
-
-    # Fix: remove the problematic first_seen path from $set above; keep it only in $setOnInsert.
-    group_update["$set"].pop("first_seen", None)
 
     await db["groups"].update_one({"group_id": payload.group_id}, group_update, upsert=True)
 
@@ -133,51 +127,19 @@ async def _check_blocked(db, payload: WhatsAppMessagePayload, is_group: bool) ->
 
 
 async def decide(db, payload: WhatsAppMessagePayload) -> Dict[str, Any]:
-    """Return {allowed, ai_enabled, reason, trigger_detected, reply_mode}."""
-
-    text = _message_text(payload)
-
-    # Status/broadcast
-    is_sb, sb_reason = _is_status_or_broadcast(payload)
-    if is_sb:
-        return {
-            "allowed": False,
-            "ai_enabled": False,
-            "reason": sb_reason,
-            "trigger_detected": False,
-            "reply_mode": None,
-        }
-
+    """Return {allowed, ai_enabled, reason, trigger_detected, reply_mode}. 
+    Note: Basic trigger and status checks are now handled prior to calling this."""
+    
     is_group = payload.is_group and bool(payload.group_id)
 
-    # Blocked
+    # Blocked Check
     blocked_reason = await _check_blocked(db, payload, is_group)
     if blocked_reason:
         return {
             "allowed": False,
             "ai_enabled": False,
             "reason": blocked_reason,
-            "trigger_detected": False,
-            "reply_mode": None,
-        }
-
-    # Trigger detection
-    lower = text.lower()
-    trigger_word = "nezuko" in lower
-    direct_reply = bool(payload.quoted_text) and ("nezuko" in str(payload.quoted_text).lower())
-
-    trigger_detected = trigger_word or direct_reply
-
-    # Ignore self message: best-effort using platform_id vs sender? The architecture has no self id.
-    # Keep it strictly safe: if sender_name equals bot name is unavailable; so we don't apply this here.
-
-    if not trigger_detected:
-        # reply only when trigger conditions are met
-        return {
-            "allowed": False,
-            "ai_enabled": False,
-            "reason": "no trigger word",
-            "trigger_detected": False,
+            "trigger_detected": True,
             "reply_mode": None,
         }
 
@@ -198,11 +160,11 @@ async def decide(db, payload: WhatsAppMessagePayload) -> Dict[str, Any]:
             "allowed": False,
             "ai_enabled": False,
             "reason": "AI disabled",
-            "trigger_detected": trigger_detected,
+            "trigger_detected": True,
             "reply_mode": reply_mode,
         }
 
-    # At this point trigger is detected; return allowed
+    # All checks passed
     return {
         "allowed": True,
         "ai_enabled": True,
@@ -216,20 +178,47 @@ async def decide(db, payload: WhatsAppMessagePayload) -> Dict[str, Any]:
 async def receive_whatsapp_message(payload: WhatsAppMessagePayload, db=Depends(get_db)):
     start = time.perf_counter()
     try:
-        # Safety slice
+        # 1. Safety slice for extreme lengths
         text = _message_text(payload)
         if payload.message and len(payload.message) > MAX_MESSAGE_LENGTH_FALLBACK:
             payload.message = payload.message[:MAX_MESSAGE_LENGTH_FALLBACK]
             text = _message_text(payload)
 
+        # ==========================================
+        # ⚡ FAST-FAIL FILTERS (ZERO DATABASE USAGE)
+        # ==========================================
+        
+        # A. Status/broadcast early rejection
+        is_sb, sb_reason = _is_status_or_broadcast(payload)
+        if is_sb:
+            return {"status": "ignored", "reason": sb_reason}
+
+        # B. Trigger detection early rejection
+        lower = text.lower()
+        trigger_word = "nezuko" in lower
+        direct_reply = bool(payload.quoted_text) and ("nezuko" in str(payload.quoted_text).lower())
+        trigger_detected = trigger_word or direct_reply
+
+        # If Nezuko is not mentioned, stop immediately. No DB writes!
+        if not trigger_detected:
+            return {
+                "status": "ignored",
+                "reason": "no trigger word",
+            }
+            
+        # ==========================================
+        # 💾 DATABASE OPERATIONS (ONLY IF TRIGGERED)
+        # ==========================================
+
         now_ts = payload.timestamp or int(time.time())
         is_group = payload.is_group and bool(payload.group_id)
 
-        # Always auto-register sender + group before any decision
+        # Register user and group ONLY because they actually triggered the bot
         await _ensure_user(db, payload, now_ts, text)
         if is_group:
             await _ensure_group(db, payload, now_ts)
 
+        # Check blocklists and chat settings
         decision = await decide(db, payload)
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -239,7 +228,7 @@ async def receive_whatsapp_message(payload: WhatsAppMessagePayload, db=Depends(g
             payload.sender_name,
             payload.chat_id,
             payload.group_id if is_group else None,
-            decision.get("trigger_detected"),
+            True,  # Trigger is always true if it reaches here
             decision.get("ai_enabled"),
             decision.get("reply_mode"),
             decision.get("allowed"),
@@ -260,6 +249,10 @@ async def receive_whatsapp_message(payload: WhatsAppMessagePayload, db=Depends(g
                 "reason": "AI disabled",
             }
 
+        # ==========================================
+        # 🤖 AI GENERATION
+        # ==========================================
+
         reply = await generate_chat_response(payload.message, [])
         reply = (str(reply) if reply is not None else "").strip()[:4000]
 
@@ -270,4 +263,3 @@ async def receive_whatsapp_message(payload: WhatsAppMessagePayload, db=Depends(g
     except Exception:
         logger.exception("WhatsApp message handling failed")
         raise HTTPException(status_code=500, detail="WhatsApp integration error")
-
