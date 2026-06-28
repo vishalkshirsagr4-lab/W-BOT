@@ -3,24 +3,19 @@ dotenv.config();
 
 const axios = require('axios');
 const qrcode = require('qrcode-terminal');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, RemoteAuth } = require('whatsapp-web.js');
+const { MongoStore } = require('wwebjs-mongo');
+const mongoose = require('mongoose');
 const NodeCache = require('node-cache');
+const express = require('express');
+const dns = require('dns');
+dns.setServers(['8.8.8.8','8.8.4.4']);
 
-const fs = require('fs');
-const path = require('path');
-
-// Auto-delete the browser lock file if it was left behind
-function cleanSessionLock() {
-    const lockPath = path.join(__dirname, '.wwebjs_auth', `session-${SESSION_NAME}`, 'SingletonLock');
-    if (fs.existsSync(lockPath)) {
-        try {
-            fs.unlinkSync(lockPath);
-            console.log('[WA][INFO] Cleared leftover browser lock file.');
-        } catch (err) {
-            console.error('[WA][ERROR] Could not clear lock file:', err);
-        }
-    }
-}
+// ---------- Dummy Server for Render ----------
+const app = express();
+app.get('/', (req, res) => res.send('Nezuko Bot is Awake! 🌸'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`[WA][INFO] Dummy server listening on port ${PORT}`));
 
 // ---------- Config ----------
 const FASTAPI_URL = process.env.FASTAPI_URL || 'http://localhost:8000';
@@ -30,6 +25,12 @@ const OWNER_NUMBER = process.env.OWNER_NUMBER || '';
 const BOT_NAME = process.env.BOT_NAME || 'College Community Bot';
 const BOT_PREFIX = process.env.BOT_PREFIX || '/';
 const MAX_MESSAGE_LENGTH = Number(process.env.MAX_MESSAGE_LENGTH || '4000');
+const MONGODB_URI = process.env.MONGODB_URI;
+
+if (!MONGODB_URI) {
+    console.error(process.env.SESSION_NAME);
+    process.exit(1);
+}
 
 const WHATSAPP_API_ENDPOINT = `${FASTAPI_URL}/api/v1/whatsapp/message`;
 
@@ -135,7 +136,6 @@ async function normalizeWhatsAppMessage(message) {
   const body = safeSlice(message.body, MAX_MESSAGE_LENGTH);
   const messageType = message.type || (message.hasMedia ? 'media' : 'text');
 
-  // Correctly extract quoted text using official API
   let quotedText = null;
   if (message.hasQuotedMsg) {
       try {
@@ -191,155 +191,155 @@ async function forwardToFastAPI(payload, retries = 3) {
               return null;
           }
           
-          // Exponential backoff
           await new Promise(res => setTimeout(res, 1000 * Math.pow(2, attempt - 1)));
       }
   }
 }
 
-// ---------- WhatsApp client ----------
-const client = new Client({
-  authStrategy: new LocalAuth({ clientId: SESSION_NAME }),
-  puppeteer: {
-    headless: HEADLESS,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-rendering',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',
-      '--disable-gpu'
-    ],
-  },
-  restartOnAuthFail: true,
-});
-
-client.on('qr', (qr) => {
-  logInfo('QR received. Scan it once to authenticate.');
-  qrcode.generate(qr, { small: true });
-});
-
-client.on('ready', () => {
-  logInfo('Client is ready ✅');
-});
-
-client.on('auth_failure', (msg) => {
-  logError('Auth failure. Session may be expired. QR will be required again.', msg);
-});
-
-client.on('disconnected', (reason) => {
-  logWarn('Disconnected. whatsapp-web.js will attempt reconnect.', { reason });
-  setTimeout(() => {
-    client.initialize().catch(err => logError('Reconnect failed:', err));
-  }, 5000);
-});
-
-client.on('message_create', async (message) => {
-
-console.log(`\n[DEBUG] Raw message detected!`);
-  console.log(`[DEBUG] From: ${message.from} | fromMe: ${message.fromMe} | Body: "${message.body}"`);
-
-
-  try {
-
-    // 1. Critical Stop: Prevent bot from replying to itself
-    if (message.fromMe) {
-        console.log(`[DEBUG] Ignored: Message was sent by the bot (fromMe).`); // <-- Add this to see if it drops here
-        return;
-    }
-
-    const from = message.from;
-    if (!from) return;
-
-    // 2. Filter Status and Broadcasts
-    if (from.endsWith('@broadcast') || from.endsWith('@status')) return;
-
-    // 3. Duplicate Message Protection
-    if (messageCache.has(message.id._serialized)) return;
-    messageCache.set(message.id._serialized, true);
-
-    const body = message.body || '';
-    if (!body && !message.hasMedia) return;
-
-    const senderId = message.author || message.from;
-    if (!senderId) return;
-
-    // 4. Rate Limiting
-    if (isRateLimited(senderId)) {
-      logWarn('Rate limited sender:', senderId);
-      return;
-    }
-
-    // 5. Owner Commands
-    if (body) {
-      const ownerHandled = await handleOwnerCommand(message, body);
-      if (ownerHandled) return;
-    }
-
-    // 6. Normalize Payload
-    const payload = await normalizeWhatsAppMessage(message);
-    const chat = await message.getChat().catch(() => null);
-
-    // 7. UX: Start Typing Indicator
-    if (chat) await chat.sendStateTyping();
-
-    const startTime = Date.now();
-    logInfo(`Incoming payload from ${payload.sender_name}`, { chat_id: payload.chat_id });
-
-    // 8. Send to API
-    const apiRes = await forwardToFastAPI(payload);
+// ---------- Database & WhatsApp Client Initialization ----------
+mongoose.connect(MONGODB_URI).then(() => {
+    logInfo('Successfully connected to MongoDB for Session Storage ✅');
     
-    // 9. UX: Stop Typing Indicator
-    if (chat) await chat.clearState();
-
-    if (!apiRes) return;
-
-    if (apiRes.status !== 'success') {
-      const reason = apiRes.reason || 'unknown';
-      logInfo('FastAPI ignored message.', { reason, chat: payload.chat_id });
-      return;
-    }
-
-    const replyText = (apiRes.reply ?? '').toString().trim();
+    const store = new MongoStore({ mongoose: mongoose });
     
-    if (!replyText) {
-      logWarn('FastAPI returned empty reply; sending fallback.');
-      const fallback = process.env.FASTAPI_FALLBACK_REPLY || 'Sorry! I had trouble generating a reply right now. 😭';
-      await message.reply(fallback);
-      return;
-    }
-
-    // 10. Final Reply
-    await message.reply(replyText);
-    logInfo(`Replied to user successfully in ${Date.now() - startTime}ms.`);
-
-  } catch (err) {
-    logError('Message handler error', {
-      message: err?.message,
-      stack: err?.stack,
+    const client = new Client({
+      authStrategy: new RemoteAuth({
+        store: store,
+        backupSyncIntervalMs: 60000, // Saves session to DB every 60 seconds
+        clientId: SESSION_NAME
+      }),
+      puppeteer: {
+        headless: HEADLESS,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-rendering',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-gpu'
+        ],
+      },
+      restartOnAuthFail: true,
     });
-  }
-});
 
-// ---------- Global Crash Protection ----------
-process.on('uncaughtException', (err) => {
-    logError('CRITICAL Uncaught Exception (Process saved):', err);
-});
+    client.on('qr', (qr) => {
+      logInfo('QR received. Scan it once to authenticate.');
+      qrcode.generate(qr, { small: true });
+    });
 
-process.on('unhandledRejection', (reason, promise) => {
-    logError('CRITICAL Unhandled Rejection at:', promise, 'reason:', reason);
-});
+    client.on('ready', () => {
+      logInfo('Client is ready and linked to MongoDB! ✅');
+    });
 
-process.on('SIGINT', async () => {
-  logInfo('SIGINT received. Closing client...');
-  try {
-    await client.destroy();
-  } catch (e) {}
-  process.exit(0);
-});
+    client.on('remote_session_saved', () => {
+      logInfo('WhatsApp session backed up to MongoDB successfully.');
+    });
 
-// Clean up any old locks before starting
-cleanSessionLock();
-client.initialize();
+    client.on('auth_failure', (msg) => {
+      logError('Auth failure. Session may be expired. QR will be required again.', msg);
+    });
+
+    client.on('disconnected', (reason) => {
+      logWarn('Disconnected. whatsapp-web.js will attempt reconnect.', { reason });
+      setTimeout(() => {
+        client.initialize().catch(err => logError('Reconnect failed:', err));
+      }, 5000);
+    });
+
+    client.on('message_create', async (message) => {
+      console.log(`\n[DEBUG] Raw message detected!`);
+      console.log(`[DEBUG] From: ${message.from} | fromMe: ${message.fromMe} | Body: "${message.body}"`);
+
+      try {
+        if (message.fromMe) {
+            console.log(`[DEBUG] Ignored: Message was sent by the bot (fromMe).`);
+            return;
+        }
+
+        const from = message.from;
+        if (!from) return;
+
+        if (from.endsWith('@broadcast') || from.endsWith('@status')) return;
+
+        if (messageCache.has(message.id._serialized)) return;
+        messageCache.set(message.id._serialized, true);
+
+        const body = message.body || '';
+        if (!body && !message.hasMedia) return;
+
+        const senderId = message.author || message.from;
+        if (!senderId) return;
+
+        if (isRateLimited(senderId)) {
+          logWarn('Rate limited sender:', senderId);
+          return;
+        }
+
+        if (body) {
+          const ownerHandled = await handleOwnerCommand(message, body);
+          if (ownerHandled) return;
+        }
+
+        const payload = await normalizeWhatsAppMessage(message);
+        const chat = await message.getChat().catch(() => null);
+
+        if (chat) await chat.sendStateTyping();
+
+        const startTime = Date.now();
+        logInfo(`Incoming payload from ${payload.sender_name}`, { chat_id: payload.chat_id });
+
+        const apiRes = await forwardToFastAPI(payload);
+        
+        if (chat) await chat.clearState();
+
+        if (!apiRes) return;
+
+        if (apiRes.status !== 'success') {
+          const reason = apiRes.reason || 'unknown';
+          logInfo('FastAPI ignored message.', { reason, chat: payload.chat_id });
+          return;
+        }
+
+        const replyText = (apiRes.reply ?? '').toString().trim();
+        
+        if (!replyText) {
+          logWarn('FastAPI returned empty reply; sending fallback.');
+          const fallback = process.env.FASTAPI_FALLBACK_REPLY || 'Sorry! I had trouble generating a reply right now. 😭';
+          await message.reply(fallback);
+          return;
+        }
+
+        await message.reply(replyText);
+        logInfo(`Replied to user successfully in ${Date.now() - startTime}ms.`);
+
+      } catch (err) {
+        logError('Message handler error', {
+          message: err?.message,
+          stack: err?.stack,
+        });
+      }
+    });
+
+    // ---------- Global Crash Protection ----------
+    process.on('uncaughtException', (err) => {
+        logError('CRITICAL Uncaught Exception (Process saved):', err);
+    });
+
+    process.on('unhandledRejection', (reason, promise) => {
+        logError('CRITICAL Unhandled Rejection at:', promise, 'reason:', reason);
+    });
+
+    process.on('SIGINT', async () => {
+      logInfo('SIGINT received. Closing client...');
+      try {
+        await client.destroy();
+      } catch (e) {}
+      process.exit(0);
+    });
+
+    client.initialize();
+}).catch(err => {
+    console.error('[WA][ERROR] Failed to connect to MongoDB', err);
+});
