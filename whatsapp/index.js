@@ -205,11 +205,15 @@ mongoose.connect(MONGODB_URI).then(() => {
 const fs = require("fs");
 
 console.log(
+  "Chrome exists:",
   fs.existsSync("/opt/render/.cache/puppeteer/chrome/linux-146.0.7680.31/chrome-linux64/chrome")
 );
-    const client = new Client({
-        console.log("PUPPETEER_EXECUTABLE_PATH =", process.env.PUPPETEER_EXECUTABLE_PATH);
+
+console.log("PUPPETEER_EXECUTABLE_PATH =", process.env.PUPPETEER_EXECUTABLE_PATH);
 console.log("PUPPETEER_CACHE_DIR =", process.env.PUPPETEER_CACHE_DIR);
+
+const client = new Client({
+    const client = new Client({
       authStrategy: new RemoteAuth({
         store: store,
         backupSyncIntervalMs: 60000, // Saves session to DB every 60 seconds
@@ -217,7 +221,6 @@ console.log("PUPPETEER_CACHE_DIR =", process.env.PUPPETEER_CACHE_DIR);
       }),
       puppeteer: {
     headless: HEADLESS,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
     args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
