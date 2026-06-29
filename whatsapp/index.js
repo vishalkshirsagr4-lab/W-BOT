@@ -212,7 +212,7 @@ console.log(
 console.log("PUPPETEER_EXECUTABLE_PATH =", process.env.PUPPETEER_EXECUTABLE_PATH);
 console.log("PUPPETEER_CACHE_DIR =", process.env.PUPPETEER_CACHE_DIR);
 
-const client = new Client({
+
     const client = new Client({
       authStrategy: new RemoteAuth({
         store: store,
