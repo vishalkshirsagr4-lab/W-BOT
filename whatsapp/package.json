@@ -10,9 +10,10 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node index.js",
-    "postinstall": "npx puppeteer browsers install chrome@146.0.7680.31"
+    "postinstall": "node -e \"console.log(\\\"[whatsapp] skip browser download (baileys mode)\\\")\""
   },
   "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.23",
     "archiver": "^8.0.0",
     "axios": "^1.7.7",
     "debug": "^4.4.3",
@@ -22,10 +23,7 @@
     "fs-extra": "^11.3.5",
     "mongoose": "^9.7.3",
     "node-cache": "^5.1.2",
-    "puppeteer": "^25.2.1",
-    "qrcode-terminal": "^0.12.0",
-    "unzipper": "^0.12.5",
-    "whatsapp-web.js": "^1.26.0",
-    "wwebjs-mongo": "^1.1.0"
+    "pino": "^9.14.0",
+    "qrcode-terminal": "^0.12.0"
   }
 }
