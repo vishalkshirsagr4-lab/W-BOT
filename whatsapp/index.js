@@ -297,11 +297,19 @@ async function start() {
 
     if (qr) {
       try {
-        const qrcode = require('qrcode-terminal');
-        qrcode.generate(qr, { small: true });
-        logInfo('[WA][QR] QR received, scan it in WhatsApp -> Linked Devices');
+        // Cloud-friendly QR: data URL that you can open in a browser.
+        // Render native logs often corrupt terminal ASCII QR.
+        const qrcode = require('qrcode');
+        qrcode
+          .toDataURL(qr, { errorCorrectionLevel: 'M', margin: 1, scale: 6 })
+          .then((dataUrl) => {
+            logInfo('[WA][QR] Scan QR from this data URL (open in browser):', { dataUrl });
+          })
+          .catch((e) => {
+            logError('[WA][QR] Failed to generate QR data URL', e?.message || e);
+          });
       } catch (e) {
-        logError('[WA][QR] Failed to render QR in terminal', e?.message || e);
+        logError('[WA][QR] QR handling error', e?.message || e);
       }
     }
 
