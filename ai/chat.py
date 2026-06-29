@@ -44,7 +44,7 @@ def _configured_model_name() -> str:
     name = getattr(settings, "GEMINI_MODEL", None)
     if not name:
         # Changed default to gemini-1.5-flash to unlock 1,500 free requests per day
-        name = "models/gemini-2.0-flash-lite-001"
+        name = "models/gemini-2.5-flash"
     return str(name).strip()
 
 
