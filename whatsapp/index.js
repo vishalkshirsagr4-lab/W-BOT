@@ -199,8 +199,10 @@ async function normalizeWhatsAppMessage(sock, m) {
   };
 }
 
-async function forwardToFastAPI(payload, retries = 3) {
-  const timeoutMs = Number(process.env.FASTAPI_TIMEOUT_MS || '55000');
+async function forwardToFastAPI(payload, retries = 1) {
+  // Hard timeout: keep WhatsApp replies within 2–5 seconds.
+  const timeoutMs = Number(process.env.FASTAPI_TIMEOUT_MS || '8000');
+
   const cacheKey = payload?.platform_id ? `${payload.platform_id}|${payload.message}|${payload.is_group}` : null;
 
   if (cacheKey) {
