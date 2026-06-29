@@ -221,6 +221,7 @@ console.log("PUPPETEER_CACHE_DIR =", process.env.PUPPETEER_CACHE_DIR);
       }),
       puppeteer: {
     headless: HEADLESS,
+     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
     args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
