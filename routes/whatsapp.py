@@ -177,9 +177,24 @@ async def decide(db, payload: WhatsAppMessagePayload) -> Dict[str, Any]:
 @router.post("/message")
 async def receive_whatsapp_message(payload: WhatsAppMessagePayload, db=Depends(get_db)):
     start = time.perf_counter()
+    request_deadline_s = 20  # hard cap for this endpoint
+
+    # Hard safety: if we somehow run long, we still return quickly.
+    total_deadline = start + request_deadline_s
+
+    def remaining_ms() -> int:
+        return max(0, int((total_deadline - time.perf_counter()) * 1000))
+
+    logger.info('[WA][REQ] Request received')
+
     try:
+        logger.info('[WA][REQ] Request validation complete')
+
         # 1. Safety slice for extreme lengths
+        step_t0 = time.perf_counter()
         text = _message_text(payload)
+        logger.info('[WA][TIMING] Request validation/message normalization in_ms=%s', int((time.perf_counter()-step_t0)*1000))
+
         if payload.message and len(payload.message) > MAX_MESSAGE_LENGTH_FALLBACK:
             payload.message = payload.message[:MAX_MESSAGE_LENGTH_FALLBACK]
             text = _message_text(payload)
@@ -214,12 +229,20 @@ async def receive_whatsapp_message(payload: WhatsAppMessagePayload, db=Depends(g
         is_group = payload.is_group and bool(payload.group_id)
 
         # Register user and group ONLY because they actually triggered the bot
+        step_t0 = time.perf_counter()
         await _ensure_user(db, payload, now_ts, text)
+        logger.info('[WA][TIMING] Mongo ensure_user in_ms=%s', int((time.perf_counter()-step_t0)*1000))
+
         if is_group:
+            step_t0 = time.perf_counter()
             await _ensure_group(db, payload, now_ts)
+            logger.info('[WA][TIMING] Mongo ensure_group in_ms=%s', int((time.perf_counter()-step_t0)*1000))
 
         # Check blocklists and chat settings
+        step_t0 = time.perf_counter()
         decision = await decide(db, payload)
+        logger.info('[WA][TIMING] Mongo decision/reads in_ms=%s', int((time.perf_counter()-step_t0)*1000))
+
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 

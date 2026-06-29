@@ -197,7 +197,7 @@ async function forwardToFastAPI(payload, retries = 3) {
   }
 }
 
-// ---------- Puppeteer executable discovery (Render-safe, no hardcoded paths) ----------
+// ---------- Puppeteer executable discovery (Puppeteer v25 official only) ----------
 async function getChromeExecutablePath() {
   try {
     // Prefer Puppeteer's own resolution for this Puppeteer version.
@@ -208,7 +208,7 @@ async function getChromeExecutablePath() {
     }
 
     // Will throw if revision isn't available on disk.
-    const resolved = puppeteer.executablePath();
+    const resolved = await puppeteer.executablePath();
 
     const exists = (() => {
       try {
@@ -225,42 +225,7 @@ async function getChromeExecutablePath() {
     if (!exists) throw new Error(`Resolved executablePath does not exist: ${resolved}`);
     return resolved;
   } catch (err) {
-    console.warn('[WA][WARN] executablePath() failed; attempting to download managed Chromium...', err?.message || err);
-
-    // Ensure we have a writable cache dir on Render runtime.
-    // (Render native provides writable filesystem; keep it aligned with Puppeteer’s expected layout.)
-    const fs = require('fs');
-    // const path = require('path');
-
-    const cacheRoot = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
-    try {
-      fs.mkdirSync(cacheRoot, { recursive: true });
-    } catch (e) {
-      // ignore mkdir failures; BrowserFetcher will still try.
-    }
-
-    process.env.PUPPETEER_CACHE_DIR = cacheRoot;
-
-    const { BrowserFetcher } = puppeteer;
-    const fetcher = new BrowserFetcher({
-      product: 'chrome',
-    });
-
-    // Puppeteer v25+ exposes the revision it expects for its bundled browser.
-    const revision = puppeteer?.browserRevision || null;
-
-    const info = await fetcher.download(revision);
-    const executablePath = info.executablePath;
-
-    const exists = fs.existsSync(executablePath);
-    console.log('[WA][INFO] Downloaded Chromium executablePath =', executablePath);
-    console.log('[WA][INFO] Downloaded Chrome executable exists:', exists);
-
-    if (!exists) {
-      throw new Error(`Chromium downloaded but executable missing: ${executablePath}`);
-    }
-
-    return executablePath;
+    throw new Error(`Puppeteer could not resolve a browser executable. Original error: ${err?.message || err}`);
   }
 }
 
