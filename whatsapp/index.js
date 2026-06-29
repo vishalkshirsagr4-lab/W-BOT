@@ -201,8 +201,15 @@ mongoose.connect(MONGODB_URI).then(() => {
     logInfo('Successfully connected to MongoDB for Session Storage ✅');
     
     const store = new MongoStore({ mongoose: mongoose });
-    
+
+const fs = require("fs");
+
+console.log(
+  fs.existsSync("/opt/render/.cache/puppeteer/chrome/linux-146.0.7680.31/chrome-linux64/chrome")
+);
     const client = new Client({
+        console.log("PUPPETEER_EXECUTABLE_PATH =", process.env.PUPPETEER_EXECUTABLE_PATH);
+console.log("PUPPETEER_CACHE_DIR =", process.env.PUPPETEER_CACHE_DIR);
       authStrategy: new RemoteAuth({
         store: store,
         backupSyncIntervalMs: 60000, // Saves session to DB every 60 seconds
