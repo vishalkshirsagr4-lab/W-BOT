@@ -209,17 +209,14 @@ mongoose.connect(MONGODB_URI).then(() => {
         clientId: SESSION_NAME
       }),
       puppeteer: {
-        headless: HEADLESS,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-rendering',
-          '--no-first-run',
-          '--no-zygote',
-          '--single-process',
-          '--disable-gpu'
-        ],
+    headless: HEADLESS,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+    args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+    ]
       },
       restartOnAuthFail: true,
     });
