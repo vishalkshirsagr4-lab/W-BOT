@@ -202,12 +202,6 @@ mongoose.connect(MONGODB_URI).then(() => {
     
     const store = new MongoStore({ mongoose: mongoose });
 
-const fs = require("fs");
-
-console.log(
-  "Chrome exists:",
-  fs.existsSync("/opt/render/.cache/puppeteer/chrome/linux-146.0.7680.31/chrome-linux64/chrome")
-);
 
 console.log("PUPPETEER_EXECUTABLE_PATH =", process.env.PUPPETEER_EXECUTABLE_PATH);
 console.log("PUPPETEER_CACHE_DIR =", process.env.PUPPETEER_CACHE_DIR);
@@ -221,7 +215,6 @@ console.log("PUPPETEER_CACHE_DIR =", process.env.PUPPETEER_CACHE_DIR);
       }),
       puppeteer: {
     headless: HEADLESS,
-     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
     args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
