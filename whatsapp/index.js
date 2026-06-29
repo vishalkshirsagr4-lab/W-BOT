@@ -315,9 +315,19 @@ async function start() {
     }
   });
 
-  sock.ev.on('messages.upsert', async (event) => {
+  sock.ev.on('messages.upsert', (event) => {
+    // IMPORTANT: keep this handler non-blocking; do not await FastAPI inline.
+    setImmediate(() => {
+      handleUpsertEvent(sock, event).catch((e) => {
+        logError('messages.upsert outer handler error', { message: e?.message, stack: e?.stack });
+      });
+    });
+  });
+
+  async function handleUpsertEvent(sock, event) {
     try {
       const m = event?.messages?.[0];
+
       if (!m || !m.key) return;
 
       // Dedup
@@ -345,10 +355,16 @@ async function start() {
         return;
       }
 
+      // Immediately acknowledge/typing (doesn't wait for AI)
+      try {
+        await sock.sendMessage(fromJid, { text: '⏳' });
+      } catch {}
+
       const ownerHandled = await handleOwnerCommand(sock, m, body);
       if (ownerHandled) return;
 
       const payload = await normalizeWhatsAppMessage(sock, {
+
         ...m,
         messageText: body,
       });
@@ -373,7 +389,7 @@ async function start() {
     } catch (e) {
       logError('messages.upsert handler error', { message: e?.message, stack: e?.stack });
     }
-  });
+  }
 }
 
 start().catch((e) => {
