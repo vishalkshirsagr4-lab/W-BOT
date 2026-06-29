@@ -4,6 +4,7 @@ dotenv.config();
 const axios = require('axios');
 const qrcode = require('qrcode-terminal');
 const { Client, RemoteAuth } = require('whatsapp-web.js');
+const puppeteer = require('puppeteer');
 const { MongoStore } = require('wwebjs-mongo');
 const mongoose = require('mongoose');
 const NodeCache = require('node-cache');
@@ -196,8 +197,75 @@ async function forwardToFastAPI(payload, retries = 3) {
   }
 }
 
+// ---------- Puppeteer executable discovery (Render-safe, no hardcoded paths) ----------
+async function getChromeExecutablePath() {
+  try {
+    // Prefer Puppeteer's own resolution for this Puppeteer version.
+    // This uses the officially supported cache/download mechanism.
+    const cacheDir = process.env.PUPPETEER_CACHE_DIR;
+    if (cacheDir) {
+      console.log('[WA][INFO] PUPPETEER_CACHE_DIR (env)=', cacheDir);
+    }
+
+    // Will throw if revision isn't available on disk.
+    const resolved = puppeteer.executablePath();
+
+    const exists = (() => {
+      try {
+        const fs = require('fs');
+        return fs.existsSync(resolved);
+      } catch {
+        return false;
+      }
+    })();
+
+    console.log('[WA][INFO] puppeteer.executablePath() =', resolved);
+    console.log('[WA][INFO] Chrome executable exists:', exists);
+
+    if (!exists) throw new Error(`Resolved executablePath does not exist: ${resolved}`);
+    return resolved;
+  } catch (err) {
+    console.warn('[WA][WARN] executablePath() failed; attempting to download managed Chromium...', err?.message || err);
+
+    // Ensure we have a writable cache dir on Render runtime.
+    // (Render native provides writable filesystem; keep it aligned with Puppeteer’s expected layout.)
+    const fs = require('fs');
+    // const path = require('path');
+
+    const cacheRoot = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
+    try {
+      fs.mkdirSync(cacheRoot, { recursive: true });
+    } catch (e) {
+      // ignore mkdir failures; BrowserFetcher will still try.
+    }
+
+    process.env.PUPPETEER_CACHE_DIR = cacheRoot;
+
+    const { BrowserFetcher } = puppeteer;
+    const fetcher = new BrowserFetcher({
+      product: 'chrome',
+    });
+
+    // Puppeteer v25+ exposes the revision it expects for its bundled browser.
+    const revision = puppeteer?.browserRevision || null;
+
+    const info = await fetcher.download(revision);
+    const executablePath = info.executablePath;
+
+    const exists = fs.existsSync(executablePath);
+    console.log('[WA][INFO] Downloaded Chromium executablePath =', executablePath);
+    console.log('[WA][INFO] Downloaded Chrome executable exists:', exists);
+
+    if (!exists) {
+      throw new Error(`Chromium downloaded but executable missing: ${executablePath}`);
+    }
+
+    return executablePath;
+  }
+}
+
 // ---------- Database & WhatsApp Client Initialization ----------
-mongoose.connect(MONGODB_URI).then(() => {
+mongoose.connect(MONGODB_URI).then(async () => {
     logInfo('Successfully connected to MongoDB for Session Storage ✅');
     
     const store = new MongoStore({ mongoose: mongoose });
@@ -207,6 +275,7 @@ console.log("PUPPETEER_EXECUTABLE_PATH =", process.env.PUPPETEER_EXECUTABLE_PATH
 console.log("PUPPETEER_CACHE_DIR =", process.env.PUPPETEER_CACHE_DIR);
 
 
+    const executablePath = await getChromeExecutablePath();
     const client = new Client({
       authStrategy: new RemoteAuth({
         store: store,
@@ -215,6 +284,7 @@ console.log("PUPPETEER_CACHE_DIR =", process.env.PUPPETEER_CACHE_DIR);
       }),
       puppeteer: {
     headless: HEADLESS,
+    executablePath,
     args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
