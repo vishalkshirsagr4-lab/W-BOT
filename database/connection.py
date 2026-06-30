@@ -17,6 +17,12 @@ db_instance = Database()
 
 async def connect_to_mongo():
     """Establish connection to MongoDB."""
+    if not settings.MONGODB_URI:
+        logger.warning("MONGODB_URI is not set; skipping Mongo connection.")
+        db_instance.client = None
+        db_instance.db = None
+        return
+
     try:
         logger.info("⏳ Connecting to MongoDB...")
         db_instance.client = AsyncIOMotorClient(settings.MONGODB_URI)
@@ -28,6 +34,7 @@ async def connect_to_mongo():
     except Exception as e:
         logger.error(f"❌ Could not connect to MongoDB: {e}")
         raise e
+
 
 async def close_mongo_connection():
     """Close MongoDB connection gracefully."""

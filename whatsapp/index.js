@@ -25,7 +25,8 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[WA][INFO] Dummy server listening on port ${PORT}`));
 
 // ---------- Config ----------
-const FASTAPI_URL = process.env.FASTAPI_URL || 'http://localhost:8000';
+const FASTAPI_URL = process.env.FASTAPI_URL || '';
+
 const OWNER_NUMBER = process.env.OWNER_NUMBER || '';
 const BOT_NAME = process.env.BOT_NAME || 'College Community Bot';
 const BOT_PREFIX = process.env.BOT_PREFIX || '/';
@@ -49,7 +50,8 @@ const aiResponseCache = new NodeCache({ stdTTL: 10 * 60, checkperiod: 60 }); // 
 const inFlightBySender = new Map();
 
 
-const WHATSAPP_API_ENDPOINT = `${FASTAPI_URL}/api/v1/whatsapp/message`;
+const WHATSAPP_API_ENDPOINT = FASTAPI_URL ? `${FASTAPI_URL}/api/v1/whatsapp/message` : '';
+
 
 // ---------- Logging helpers ----------
 function logInfo(msg, obj) {
@@ -200,6 +202,10 @@ async function normalizeWhatsAppMessage(sock, m) {
 }
 
 async function forwardToFastAPI(payload, retries = 1) {
+  if (!WHATSAPP_API_ENDPOINT) {
+    return { status: 'error', reason: 'FASTAPI_URL missing on Render', reply: (process.env.FASTAPI_FALLBACK_REPLY || 'FASTAPI_URL is not configured on this server. ❌') };
+  }
+
   // Hard timeout: keep WhatsApp replies within 2–5 seconds.
   const timeoutMs = Number(process.env.FASTAPI_TIMEOUT_MS || '8000');
 

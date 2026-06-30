@@ -111,13 +111,31 @@ def _init_model() -> tuple[Optional[Any], str, list[str]]:
         return None, configured_name, available
 
 
-MODEL, GEMINI_MODEL_NAME, AVAILABLE_MODELS = _init_model()
-logger.info(
-    "Gemini initialized. model=%s key_ok=%s available_models=%s",
-    GEMINI_MODEL_NAME,
-    _api_key_valid(),
-    len(AVAILABLE_MODELS),
-)
+# NOTE: Avoid network calls / model initialization at import time.
+# Render cold starts can be slow, and Gemini SDK calls may block.
+MODEL = None
+GEMINI_MODEL_NAME = ""
+AVAILABLE_MODELS: list[str] = []
+_MODEL_INIT_LOCK = asyncio.Lock()  # type: ignore[name-defined]
+
+async def _ensure_model_initialized() -> None:
+    global MODEL, GEMINI_MODEL_NAME, AVAILABLE_MODELS
+    if MODEL is not None:
+        return
+    async with _MODEL_INIT_LOCK:
+        if MODEL is not None:
+            return
+        m, name, available = _init_model()
+        MODEL = m
+        GEMINI_MODEL_NAME = name
+        AVAILABLE_MODELS = available
+        logger.info(
+            "Gemini initialized (lazy). model=%s key_ok=%s available_models=%s",
+            GEMINI_MODEL_NAME,
+            _api_key_valid(),
+            len(AVAILABLE_MODELS),
+        )
+
 
 
 async def _gemini_send_message_blocking(chat_session: Any, user_message: str) -> Any:
@@ -126,6 +144,9 @@ async def _gemini_send_message_blocking(chat_session: Any, user_message: str) ->
 
 
 async def generate_chat_response(user_message: str, chat_history: list = None) -> str:
+    # Lazy init to avoid Render import-time blocking.
+    await _ensure_model_initialized()
+
     """Generate Gemini chat response with hard timeout.
 
     Root cause fix: the Gemini SDK call can block/hang; we isolate it in a thread and

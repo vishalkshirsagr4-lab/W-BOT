@@ -19,18 +19,28 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Lifespan events handle startup and shutdown logic.
-    Everything before 'yield' runs on startup.
-    Everything after 'yield' runs on shutdown.
-    """
+    """Lifespan events handle startup and shutdown logic."""
     # --- Startup ---
     logger.info(f"🚀 Starting {settings.PROJECT_NAME} v{settings.VERSION}...")
     await connect_to_mongo()
+
+    # Start scheduler after DB is ready (and only in this process).
+    try:
+        from scheduler.tasks import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        logger.warning("Scheduler start skipped/failed: %s", e)
+
     yield
     # --- Shutdown ---
     logger.info("🛑 Shutting down College Community Bot...")
+    try:
+        from scheduler.tasks import stop_scheduler
+        stop_scheduler()
+    except Exception:
+        pass
     await close_mongo_connection()
+
 
 # Initialize FastAPI App
 app = FastAPI(

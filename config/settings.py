@@ -10,17 +10,19 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
 
     # Database
-    MONGODB_URI: str
+    # Render may not provide all env vars; keep optional to avoid startup crash.
+    MONGODB_URI: str | None = None
     DATABASE_NAME: str = "college_bot_db"
 
     # Security
-    JWT_SECRET: str
+    JWT_SECRET: str | None = None
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
     # APIs
-    AI_API_KEY: str
+    AI_API_KEY: str | None = None
     WEATHER_API_KEY: str = ""
+
 
     # Load from .env file
     model_config = SettingsConfigDict(
