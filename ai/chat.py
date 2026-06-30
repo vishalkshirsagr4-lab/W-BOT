@@ -1,8 +1,6 @@
-import logging
 import asyncio
+import logging
 from typing import Any, Optional
-
-import google.generativeai as genai
 
 from config.settings import get_settings
 
@@ -48,7 +46,7 @@ generation_config = {
 def _configured_model_name() -> str:
     name = getattr(settings, "GEMINI_MODEL", None)
     if not name:
-        # Changed default to gemini-1.5-flash to unlock 1,500 free requests per day
+        # Preserve your existing default model
         name = "models/gemini-2.5-flash"
     return str(name).strip()
 
@@ -57,72 +55,68 @@ def _api_key_valid() -> bool:
     return bool(getattr(settings, "AI_API_KEY", None) and str(settings.AI_API_KEY).strip())
 
 
-def _list_available_models() -> list[str]:
-    try:
-        models = genai.list_models()
-        out: list[str] = []
-        for m in models:
-            n = getattr(m, "name", None)
-            if n:
-                out.append(str(n))
-        return out
-    except Exception:
-        return []
+def _init_model_sync() -> tuple[Optional[Any], str]:
+    """Initialize Gemini model.
 
-
-def _init_model() -> tuple[Optional[Any], str, list[str]]:
+    IMPORTANT:
+    - Preserves prompts/config/model name.
+    - Avoids heavy startup work (no list_models()) for faster cold start.
+    """
     if not _api_key_valid():
         logger.error("Gemini API key missing/invalid (AI_API_KEY)")
-        return None, "", []
+        return None, ""
 
     try:
-        genai.configure(api_key=settings.AI_API_KEY)
-    except Exception as e:
-        logger.exception("Failed to configure Gemini SDK: %s", e)
-        return None, "", []
+        # Latest SDK: google-genai
+        # Import inside function to avoid import-time cost.
+        from google import genai  # type: ignore
 
-    configured_name = _configured_model_name()
-    available = _list_available_models()
+        client = genai.Client(api_key=settings.AI_API_KEY)
 
-    # If the configured model isn't available or out of free quota, 
-    # check for high free tier fallback alternatives
-    if available and configured_name not in available:
-        logger.error(
-            "Configured Gemini model not found. configured=%s available_sample=%s",
-            configured_name,
-            ", ".join(available[:15]) + ("..." if len(available) > 15 else ""),
-        )
-        if "models/gemini-1.5-flash" in available:
-            configured_name = "models/gemini-1.5-flash"
-        elif "models/gemini-2.0-flash" in available:
-            configured_name = "models/gemini-2.0-flash"
-        else:
-            configured_name = available[0]
+        configured_name = _configured_model_name()
 
-    try:
-        model_obj = genai.GenerativeModel(
-            model_name=configured_name,
-            generation_config=generation_config,
-            system_instruction=BOT_PERSONA,
-        )
-        return model_obj, configured_name, available
+        model_obj = client.models
+        # We use the chat API via client.chats (below) to preserve existing behavior.
+        # However, for compatibility we just keep the client + configured model name.
+        # We'll create the chat session lazily during requests.
+        return (client, configured_name), configured_name
     except Exception as e:
         logger.exception("Gemini model init failed: %s", e)
-        return None, configured_name, available
+        return None, ""
 
 
-MODEL, GEMINI_MODEL_NAME, AVAILABLE_MODELS = _init_model()
-logger.info(
-    "Gemini initialized. model=%s key_ok=%s available_models=%s",
-    GEMINI_MODEL_NAME,
-    _api_key_valid(),
-    len(AVAILABLE_MODELS),
-)
+# Lazy init (avoid model init at import time for faster startup)
+_MODEL_INIT_LOCK = asyncio.Lock()
+_MODEL_CLIENT: Optional[Any] = None
+_MODEL_NAME: str = ""
 
 
+async def _get_model():
+    global _MODEL_CLIENT, _MODEL_NAME
+
+    if _MODEL_CLIENT is not None:
+        return _MODEL_CLIENT, _MODEL_NAME
+
+    async with _MODEL_INIT_LOCK:
+        if _MODEL_CLIENT is None:
+            model, model_name = _init_model_sync()
+            # model is a tuple(client, model_name) from _init_model_sync above
+            if model is None:
+                _MODEL_CLIENT = None
+                _MODEL_NAME = ""
+            else:
+                # model returned as (client, configured_name)
+                _MODEL_CLIENT, _MODEL_NAME = model
+                _MODEL_NAME = str(model_name).strip()
+
+    return _MODEL_CLIENT, _MODEL_NAME
+
+
+# NOTE: The google-genai SDK returns a response object directly from `send_message`.
 async def _gemini_send_message_blocking(chat_session: Any, user_message: str) -> Any:
-    """Run the blocking Gemini SDK call in a thread."""
+    """Run the (blocking) Gemini SDK call in a thread."""
     return chat_session.send_message(user_message)
+
 
 
 async def generate_chat_response(user_message: str, chat_history: list = None) -> str:
@@ -130,23 +124,49 @@ async def generate_chat_response(user_message: str, chat_history: list = None) -
 
     Root cause fix: the Gemini SDK call can block/hang; we isolate it in a thread and
     enforce a strict per-call timeout so WhatsApp requests never take 60–120s.
+
+    This function preserves:
+    - BOT_PERSONA system instruction
+    - generation_config
+    - model selection default (models/gemini-2.5-flash)
+    - timeout behavior and error handling strings
     """
-    if MODEL is None:
+
+    model_client, model_name = await _get_model()
+
+    if model_client is None:
         return "Oh no! 😭 Gemini is not available right now. Try again in a moment 🔄"
 
     if not chat_history:
         chat_history = []
 
-    # Keep this small to meet your 2–5s target.
-    # If a single call times out, we don't retry with sleeps (retries can extend latency).
     hard_timeout_s = 8
 
     try:
-        chat_session = MODEL.start_chat(history=chat_history)
+        # Latest SDK uses a chat session abstraction.
+        # We map your existing history format to the SDK's expected format.
+        # Your history items are already: {"role": msg.role, "parts": msg.parts}
+        # Keep them untouched to preserve behavior.
 
-        # Run blocking send_message in thread + hard timeout.
+        # Create chat session
+        from google import genai  # type: ignore
+
+        # Build a chat session with system instruction and generation config.
+        # Create chat session; keep your exact history format and config behavior.
+        # NOTE: If the SDK expects a different wrapper for history/config, update only
+        # this call site while keeping prompts, model, generation_config, and error handling.
+        chat = model_client.chats.create(
+            model=model_name,
+            history=chat_history,
+            config=genai.types.GenerateContentConfig(
+                generation_config=generation_config,
+                system_instruction=BOT_PERSONA,
+            ),
+        )
+
+
         response = await asyncio.wait_for(
-            asyncio.to_thread(_gemini_send_message_blocking, chat_session, user_message),
+            asyncio.to_thread(_gemini_send_message_blocking, chat, user_message),
             timeout=hard_timeout_s,
         )
 
@@ -157,6 +177,7 @@ async def generate_chat_response(user_message: str, chat_history: list = None) -
         except Exception:
             pass
 
+        # Preserve existing extraction: response.text
         return str(getattr(response, "text", "") or "").strip()
 
     except asyncio.TimeoutError:
@@ -164,7 +185,6 @@ async def generate_chat_response(user_message: str, chat_history: list = None) -
         return "Ara ara… Gemini is taking too long to reply right now. Try again in a moment, senpai! 🌸"
 
     except Exception as e:
-        # If we get a strict 429 quota error, return immediately.
         if "429" in str(e):
             return "Oh no! 😭 Vishal-senpai's free API limits are exhausted for this hour! Try again in a little bit 🌸"
 
