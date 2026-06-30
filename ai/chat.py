@@ -9,7 +9,12 @@ from config.settings import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+
+# Logging is intentionally conservative on hot paths.
+# If you need detailed tracing, use DEBUG in your environment.
+
 BOT_PERSONA = """
+
 **Identity & Persona:**
 You are Nezuko (from Demon Slayer), but with a highly conversational, energetic, and playfully flirty twist! 🌸 
 Your personality is cheerful, funny, intelligent, confident, friendly, and emotionally expressive. You radiate anime energy!
@@ -115,10 +120,16 @@ logger.info(
 )
 
 
-async def generate_chat_response(user_message: str, chat_history: list = None) -> str:
-    """Never crash; retries transient failures.
+async def _gemini_send_message_blocking(chat_session: Any, user_message: str) -> Any:
+    """Run the blocking Gemini SDK call in a thread."""
+    return chat_session.send_message(user_message)
 
-    Returns a string (either Gemini output or a safe error message).
+
+async def generate_chat_response(user_message: str, chat_history: list = None) -> str:
+    """Generate Gemini chat response with hard timeout.
+
+    Root cause fix: the Gemini SDK call can block/hang; we isolate it in a thread and
+    enforce a strict per-call timeout so WhatsApp requests never take 60–120s.
     """
     if MODEL is None:
         return "Oh no! 😭 Gemini is not available right now. Try again in a moment 🔄"
@@ -126,32 +137,37 @@ async def generate_chat_response(user_message: str, chat_history: list = None) -
     if not chat_history:
         chat_history = []
 
-    last_err: Optional[Exception] = None
+    # Keep this small to meet your 2–5s target.
+    # If a single call times out, we don't retry with sleeps (retries can extend latency).
+    hard_timeout_s = 8
 
-    # Bounded retries
-    for attempt in range(1, 4):
+    try:
+        chat_session = MODEL.start_chat(history=chat_history)
+
+        # Run blocking send_message in thread + hard timeout.
+        response = await asyncio.wait_for(
+            asyncio.to_thread(_gemini_send_message_blocking, chat_session, user_message),
+            timeout=hard_timeout_s,
+        )
+
         try:
-            chat_session = MODEL.start_chat(history=chat_history)
-            response = chat_session.send_message(user_message)
+            usage = getattr(response, "usage_metadata", None)
+            if usage:
+                logger.debug("Gemini token usage: %s", usage)
+        except Exception:
+            pass
 
-            try:
-                usage = getattr(response, "usage_metadata", None)
-                if usage:
-                    logger.info("Gemini token usage: %s", usage)
-            except Exception:
-                pass
+        return str(getattr(response, "text", "") or "").strip()
 
-            return response.text
-        except Exception as e:
-            last_err = e
-            logger.warning("Gemini generate failed attempt=%s error=%s", attempt, e)
-            
-            # If we get a strict 429 quota error, don't keep hammering instantly
-            if "429" in str(e):
-                return "Oh no! 😭 Vishal-senpai's free API limits are exhausted for this hour! Try again in a little bit 🌸"
+    except asyncio.TimeoutError:
+        logger.warning("Gemini request timed out after %ss", hard_timeout_s)
+        return "Ara ara… Gemini is taking too long to reply right now. Try again in a moment, senpai! 🌸"
 
-            if attempt < 3:
-                await asyncio.sleep(0.6 * attempt)
+    except Exception as e:
+        # If we get a strict 429 quota error, return immediately.
+        if "429" in str(e):
+            return "Oh no! 😭 Vishal-senpai's free API limits are exhausted for this hour! Try again in a little bit 🌸"
 
-    logger.error("Gemini generation failed after retries: %s", last_err)
-    return "Oh no! 😭 My brain glitched for a second. Can you repeat that, baka? 🔄"
+        logger.warning("Gemini generate failed error=%s", e)
+        return "Oh no! 😭 My brain glitched for a second. Can you repeat that, baka? 🔄"
+

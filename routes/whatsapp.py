@@ -176,7 +176,9 @@ async def decide(db, payload: WhatsAppMessagePayload) -> Dict[str, Any]:
 
 @router.post("/message")
 async def receive_whatsapp_message(payload: WhatsAppMessagePayload, db=Depends(get_db)):
+
     start = time.perf_counter()
+
     request_deadline_s = 20  # hard cap for this endpoint
 
     # Hard safety: if we somehow run long, we still return quickly.
@@ -185,10 +187,13 @@ async def receive_whatsapp_message(payload: WhatsAppMessagePayload, db=Depends(g
     def remaining_ms() -> int:
         return max(0, int((total_deadline - time.perf_counter()) * 1000))
 
-    logger.info('[WA][REQ] Request received')
+    logger.debug('[WA][REQ] Request received')
+
+    logger.debug('[WA][REQ] Request validation complete')
 
     try:
-        logger.info('[WA][REQ] Request validation complete')
+
+
 
         # 1. Safety slice for extreme lengths
         step_t0 = time.perf_counter()
@@ -286,3 +291,4 @@ async def receive_whatsapp_message(payload: WhatsAppMessagePayload, db=Depends(g
     except Exception:
         logger.exception("WhatsApp message handling failed")
         raise HTTPException(status_code=500, detail="WhatsApp integration error")
+
