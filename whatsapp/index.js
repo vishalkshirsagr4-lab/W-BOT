@@ -358,6 +358,8 @@ async function start() {
       const body = extractMessageText(m);
       if (!body && !m.message?.imageMessage && !m.message?.videoMessage) return;
 
+      const senderId = m.key.participant || fromJid;
+
       // Trigger check: ONLY respond when user message contains "nezuko" (case-insensitive)
       const textForTrigger = String(body ?? '').toLowerCase();
       if (!textForTrigger.includes('nezuko')) {
@@ -366,8 +368,6 @@ async function start() {
       }
       logInfo('[TRIGGERED] Nezuko activated', { sender: senderId });
 
-
-      const senderId = m.key.participant || fromJid;
 
       if (isRateLimited(senderId)) {
         logWarn('Rate limited sender:', senderId);
