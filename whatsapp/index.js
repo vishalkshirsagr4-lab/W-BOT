@@ -27,6 +27,87 @@ app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => console.log(`[WA][INFO] Dummy server listening on port ${PORT}`));
 
+// QR storage and expiry
+let currentQR = null; // { dataUrl, ts }
+const QR_EXPIRE_MS = Number(process.env.QR_EXPIRE_MS || 1000 * 60 * 5); // 5 minutes
+
+// QR API
+app.get('/qr', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  logInfo('QR API requested', { ip: req.ip });
+  if (socket && lastSocketHealth?.state === 'open') return res.json({ connected: true });
+  if (currentQR && Date.now() - currentQR.ts < QR_EXPIRE_MS) {
+    logInfo('QR served', { ageMs: Date.now() - currentQR.ts });
+    res.json({ connected: false, qr: currentQR.dataUrl });
+  } else {
+    if (currentQR) logInfo('QR expired', { ageMs: Date.now() - currentQR.ts });
+    res.json({ connected: false });
+  }
+});
+
+// QR Page
+app.get('/qr-page', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  logInfo('QR page requested', { ip: req.ip });
+  const html = `<!doctype html>
+  <html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>WhatsApp QR - Nezuko</title>
+    <style>
+      :root{color-scheme:dark;}
+      body{background:#0b1020;color:#e6eef8;font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+      .card{max-width:760px;width:100%;padding:24px;border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));box-shadow:0 6px 24px rgba(2,6,23,0.6);text-align:center}
+      h1{margin:0 0 8px;font-size:20px}
+      p{margin:0 0 16px;color:#9fb0d6}
+      .qr{width:320px;height:320px;margin:12px auto;background:#fff;padding:12px;border-radius:8px}
+      img.qrimg{width:100%;height:100%;object-fit:contain;display:block}
+      .small{font-size:13px;color:#8fa3cc;margin-top:8px}
+      @media(max-width:480px){.qr{width:260px;height:260px}}
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1 id="status">Waiting for QR...</h1>
+      <p id="sub">Open this page on your phone to scan the QR</p>
+      <div class="qr" id="qrbox"><img class="qrimg" id="qrimg" alt="QR code"/></div>
+      <div class="small">Auto-refreshes every 2s · Dark theme · No cache</div>
+    </div>
+    <script>
+      let last = null;
+      async function fetchQR(){
+        try{
+          const r = await fetch('/qr',{cache:'no-store'});
+          const j = await r.json();
+          if(j.connected){
+            document.getElementById('status').textContent = 'WhatsApp Connected';
+            document.getElementById('qrimg').style.display = 'none';
+            return;
+          }
+          if(j.qr){
+            if(last !== j.qr){
+              last = j.qr;
+              document.getElementById('qrimg').src = j.qr;
+              document.getElementById('qrimg').style.display = 'block';
+              document.getElementById('status').textContent = 'Scan QR with WhatsApp';
+            }
+          } else {
+            document.getElementById('status').textContent = 'Waiting for QR...';
+            document.getElementById('qrimg').style.display = 'none';
+          }
+        }catch(err){
+          console.error(err);
+        }
+      }
+      fetchQR();
+      setInterval(fetchQR,2000);
+    </script>
+  </body>
+  </html>`;
+  res.type('html').send(html);
+});
+
 // ---------- Config ----------
 const FASTAPI_URL = process.env.FASTAPI_URL || '';
 
@@ -336,6 +417,10 @@ async function saveStateSafely(saveCreds) {
 
 function shouldReconnect(reason, lastDisconnect) {
   if (isShuttingDown) return false;
+  // If we're still starting or connecting, avoid reconnect storms
+  if (lastSocketHealth?.state === 'starting' || lastSocketHealth?.state === 'connecting') return false;
+  // If a QR is active and not expired, wait for scan before reconnecting
+  if (currentQR && Date.now() - currentQR.ts < QR_EXPIRE_MS) return false;
   if (reason === 'logout') return false;
   if (lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut) return false;
   if (lastDisconnect?.error?.output?.statusCode === DisconnectReason.connectionReplaced) return true;
@@ -485,7 +570,12 @@ async function start() {
         try {
           const qrcode = require('qrcode');
           const dataUrl = await qrcode.toDataURL(qr, { errorCorrectionLevel: 'M', margin: 1, scale: 6 });
-          logInfo('[WA][QR] Scan QR from this data URL (open in browser):', { dataUrl: safeSlice(dataUrl, 200) });
+          // store QR until connection or newer QR
+          const now = Date.now();
+          const prev = currentQR;
+          currentQR = { dataUrl, ts: now };
+          logInfo('[WA][QR] QR generated', { ageMs: 0, preview: safeSlice(dataUrl, 200) });
+          if (!prev || prev.dataUrl !== dataUrl) logInfo('[WA][QR] QR updated', { ageMs: 0 });
         } catch (error) {
           logError('[WA][QR] QR handling error', { error: error?.message || error });
         }
@@ -497,6 +587,10 @@ async function start() {
         heartbeatUnhealthyCount = 0;
         lastSocketHealth = { timestamp: Date.now(), state: 'open' };
         logInfo('[WA][STATE] Connected', { isOnline, isNewLogin, receivedPendingNotifications });
+        if (currentQR) {
+          logInfo('[WA][QR] Clearing stored QR due to successful connection');
+          currentQR = null;
+        }
         return;
       }
 
