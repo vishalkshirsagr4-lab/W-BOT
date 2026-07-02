@@ -375,9 +375,11 @@ async function start() {
         return;
       }
 
+      let pendingAckMessage = null;
+
       // Immediately acknowledge/typing (doesn't wait for AI)
       try {
-        await sock.sendMessage(fromJid, { text: '⏳' });
+        pendingAckMessage = await sock.sendMessage(fromJid, { text: '⏳' });
       } catch {}
 
       const ownerHandled = await handleOwnerCommand(sock, m, body);
@@ -400,6 +402,15 @@ async function start() {
       }
 
       const replyText = (apiRes.reply ?? '').toString().trim();
+
+      try {
+        if (pendingAckMessage?.key) {
+          await sock.sendMessage(fromJid, { delete: pendingAckMessage.key });
+        }
+      } catch (deleteErr) {
+        logWarn('Failed to delete pending ack message', { error: deleteErr?.message || deleteErr });
+      }
+
       if (!replyText) {
         await sock.sendMessage(payload.chat_id, { text: process.env.FASTAPI_FALLBACK_REPLY || 'Sorry! 😭' });
         return;
