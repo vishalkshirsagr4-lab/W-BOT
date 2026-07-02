@@ -23,8 +23,9 @@ dns.setServers(['8.8.8.8', '8.8.4.4']);
 // ---------- Dummy Server for Render ----------
 const app = express();
 app.get('/', (req, res) => res.send('Nezuko Bot is Awake! 🌸'));
+app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`[WA][INFO] Dummy server listening on port ${PORT}`));
+const server = app.listen(PORT, () => console.log(`[WA][INFO] Dummy server listening on port ${PORT}`));
 
 // ---------- Config ----------
 const FASTAPI_URL = process.env.FASTAPI_URL || '';
@@ -71,6 +72,8 @@ let reconnectAttempts = 0;
 let isReconnecting = false;
 let isShuttingDown = false;
 let lastSocketHealth = null;
+let heartbeatUnhealthyCount = 0;
+const HEARTBEAT_UNHEALTHY_THRESHOLD = Number(process.env.HEARTBEAT_UNHEALTHY_THRESHOLD || '2');
 
 // ---------- Logging helpers ----------
 function logInfo(msg, obj) {
@@ -180,11 +183,9 @@ function safeSlice(s, n) {
 }
 
 function normalizeQuotedText(m) {
-  // Keep compatibility with your FastAPI payload: quoted_text is a string body (best effort)
   if (!m.quotedMsg || !m.quotedMsg.message) return null;
 
   const q = m.quotedMsg.message;
-  // Text-like fields differ by message type
   if (q.conversation) return q.conversation;
   if (q.extendedTextMessage?.text) return q.extendedTextMessage.text;
   return null;
@@ -205,12 +206,10 @@ async function normalizeWhatsAppMessage(sock, m) {
   const senderName = 'Unknown';
   const profileName = '';
 
-  // quoted
   const quotedText = normalizeQuotedText(m);
 
   const body = safeSlice(m.messageText || m.message?.conversation || '', MAX_MESSAGE_LENGTH);
 
-  // timestamp (seconds)
   const timestamp = m.messageTimestamp ? Number(m.messageTimestamp) : Math.floor(Date.now() / 1000);
 
   const messageType = m.message?.type || (m.message?.conversation ? 'text' : 'text');
@@ -229,7 +228,6 @@ async function normalizeWhatsAppMessage(sock, m) {
     message: body,
     quoted_message: quotedText,
 
-    // Keep same shape as your FastAPI Pydantic model expects
     media: m.message?.imageMessage ? { type: 'image' } : m.message?.videoMessage ? { type: 'video' } : null,
     location: null,
     sticker: null,
@@ -248,7 +246,6 @@ async function forwardToFastAPI(payload, retries = 1) {
     return { status: 'error', reason: 'FASTAPI_URL missing on Render', reply: (process.env.FASTAPI_FALLBACK_REPLY || 'FASTAPI_URL is not configured on this server. ❌') };
   }
 
-  // Hard timeout: keep WhatsApp replies within 2–5 seconds.
   const timeoutMs = Number(process.env.FASTAPI_TIMEOUT_MS || '8000');
 
   const cacheKey = payload?.platform_id ? `${payload.platform_id}|${payload.message}|${payload.is_group}` : null;
@@ -260,9 +257,6 @@ async function forwardToFastAPI(payload, retries = 1) {
 
   const fallbackReply = process.env.FASTAPI_FALLBACK_REPLY || 'Sorry! My brain is taking time. Try again in a bit 😭';
 
-  // If there's already an AI call in-flight for this sender, do not stack requests.
-  // This keeps WhatsApp response latency stable under load.
-  // (We only use this when cache misses.)
   const senderKey = payload?.platform_id;
   if (senderKey) {
     const existing = inFlightBySender.get(senderKey);
@@ -361,20 +355,46 @@ async function stopSocket(reason = 'shutdown') {
 
   if (socket) {
     try {
-      logWarn('Stopping existing socket', { reason });
-      socket.ev.removeAllListeners?.();
-      await socket.ws?.close?.();
+      logWarn('Stopping existing socket', { reason, id: socket?.user?.id, state: lastSocketHealth });
+      try {
+        socket.ev.removeAllListeners?.();
+      } catch (err) {
+        logWarn('Failed to remove event listeners cleanly', { error: err?.message || err });
+      }
+
+      try {
+        // prefer graceful close; if not available, terminate
+        if (socket.ws && typeof socket.ws.close === 'function') await socket.ws.close();
+        else if (socket.ws && typeof socket.ws.terminate === 'function') socket.ws.terminate();
+      } catch (err) {
+        logWarn('Socket close warning', { error: err?.message || err });
+      }
     } catch (error) {
-      logWarn('Socket stop warning', { error: error?.message || error });
+      logWarn('Socket stop outer warning', { error: error?.message || error });
     }
     socket = null;
   }
 }
 
 async function reconnectSocket(reason = 'unknown', lastDisconnect) {
-  if (isShuttingDown || isReconnecting) return;
+  if (isShuttingDown) {
+    logInfo('Reconnect skipped due to shutdown', { reason });
+    return;
+  }
+
+  // If socket appears healthy, skip reconnect
+  if (socket && (socket.ws?.readyState === 1 || lastSocketHealth?.state === 'open' || socket?.user?.id)) {
+    logInfo('Reconnect skipped: socket already healthy', { reason, readyState: socket.ws?.readyState, lastState: lastSocketHealth?.state });
+    return;
+  }
+
   if (!shouldReconnect(reason, lastDisconnect)) {
-    logInfo('Reconnect skipped', { reason, statusCode: lastDisconnect?.error?.output?.statusCode });
+    logInfo('Reconnect skipped by shouldReconnect', { reason, statusCode: lastDisconnect?.error?.output?.statusCode });
+    return;
+  }
+
+  if (isReconnecting) {
+    logInfo('Reconnect already in progress; skipping duplicate', { reason });
     return;
   }
 
@@ -392,10 +412,11 @@ async function reconnectSocket(reason = 'unknown', lastDisconnect) {
       logInfo('Reconnect started', { attempt, reason });
       await stopSocket('reconnect');
       await start();
+      isReconnecting = false;
     } catch (error) {
       logError('Reconnect failed', { attempt, error: error?.message || error, stack: error?.stack });
+      isReconnecting = false;
       if (attempt < RECONNECT_MAX_ATTEMPTS) {
-        isReconnecting = false;
         reconnectSocket('retry_failed', null);
       } else {
         logError('Max reconnect attempts reached; exiting', { attempt });
@@ -448,41 +469,48 @@ async function start() {
     }
   });
 
+  // Consolidated connection.update handler with detailed logging
   sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr, receivedPendingNotifications, isOnline, isNewLogin } = update;
+    try {
+      const { connection, lastDisconnect, qr, receivedPendingNotifications, isOnline, isNewLogin } = update;
 
-    if (qr) {
-      try {
-        const qrcode = require('qrcode');
-        const dataUrl = await qrcode.toDataURL(qr, { errorCorrectionLevel: 'M', margin: 1, scale: 6 });
-        logInfo('[WA][QR] Scan QR from this data URL (open in browser):', { dataUrl });
-      } catch (error) {
-        logError('[WA][QR] QR handling error', { error: error?.message || error });
+      logInfo('[WA][EVENT] connection.update', {
+        connection,
+        lastDisconnect: lastDisconnect ? { message: lastDisconnect?.error?.message, output: lastDisconnect?.error?.output } : null,
+        wsReadyState: socket?.ws?.readyState,
+        userId: socket?.user?.id,
+      });
+
+      if (qr) {
+        try {
+          const qrcode = require('qrcode');
+          const dataUrl = await qrcode.toDataURL(qr, { errorCorrectionLevel: 'M', margin: 1, scale: 6 });
+          logInfo('[WA][QR] Scan QR from this data URL (open in browser):', { dataUrl: safeSlice(dataUrl, 200) });
+        } catch (error) {
+          logError('[WA][QR] QR handling error', { error: error?.message || error });
+        }
       }
-    }
 
-    if (connection === 'open') {
-      reconnectAttempts = 0;
-      isReconnecting = false;
-      lastSocketHealth = { timestamp: Date.now(), state: 'open' };
-      logInfo('[WA][STATE] Connected', { isOnline, isNewLogin, receivedPendingNotifications });
-      return;
-    }
-
-    if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const reason = lastDisconnect?.error?.output?.payload?.message || lastDisconnect?.error?.message || 'unknown';
-      const shouldReconnectNow = shouldReconnect('connection_closed', lastDisconnect);
-      logWarn('[WA][STATE] Disconnected', { shouldReconnectNow, statusCode, reason });
-      if (shouldReconnectNow) {
-        await reconnectSocket('connection_closed', lastDisconnect);
+      if (connection === 'open') {
+        reconnectAttempts = 0;
+        isReconnecting = false;
+        heartbeatUnhealthyCount = 0;
+        lastSocketHealth = { timestamp: Date.now(), state: 'open' };
+        logInfo('[WA][STATE] Connected', { isOnline, isNewLogin, receivedPendingNotifications });
+        return;
       }
-    }
-  });
 
-  sock.ev.on('connection.update', (update) => {
-    if (update?.connection === 'open') {
-      logInfo('[WA][STATE] WebSocket open');
+      if (connection === 'close') {
+        const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.status || null;
+        const reason = lastDisconnect?.error?.output?.payload?.message || lastDisconnect?.error?.message || 'unknown';
+        const shouldReconnectNow = shouldReconnect('connection_closed', lastDisconnect);
+        logWarn('[WA][STATE] Disconnected', { shouldReconnectNow, statusCode, reason, lastDisconnect });
+        if (shouldReconnectNow) {
+          await reconnectSocket('connection_closed', lastDisconnect);
+        }
+      }
+    } catch (err) {
+      logError('connection.update handler error', { error: err?.message || err, stack: err?.stack });
     }
   });
 
@@ -495,7 +523,7 @@ async function start() {
   });
 
   sock.ev.on('ws.close', () => {
-    logWarn('[WA][STATE] WebSocket closed');
+    logWarn('[WA][STATE] WebSocket closed', { wsReadyState: socket?.ws?.readyState });
     reconnectSocket('websocket_closed', null).catch((error) => logError('ws.close reconnect failed', { error: error?.message || error }));
   });
 
@@ -510,15 +538,7 @@ async function start() {
   });
 
   sock.ev.on('connection.update', (update) => {
-    if (update?.connection === 'connecting') {
-      logInfo('[WA][STATE] Connecting');
-    }
-  });
-
-  sock.ev.on('connection.update', (update) => {
-    if (update?.connection === 'close') {
-      logInfo('[WA][STATE] Connection close event received');
-    }
+    if (update?.connection === 'connecting') logInfo('[WA][STATE] Connecting');
   });
 
   sock.ev.on('creds.update', () => {
@@ -528,20 +548,35 @@ async function start() {
   if (!heartbeatTimer) {
     heartbeatTimer = setInterval(() => {
       const now = Date.now();
-      const healthy = Boolean(socket && socket.ws && socket.ws.readyState === 1);
+
+      const wsReady = socket?.ws?.readyState;
+      const hasUser = Boolean(socket?.user?.id);
+      // Consider healthy if websocket is OPEN, or we recently had an 'open' connection state, or socket reports user id
+      const healthy = Boolean(socket && (wsReady === 1 || lastSocketHealth?.state === 'open' || hasUser));
+
       if (!healthy) {
-        logWarn('[WA][HEARTBEAT] Unhealthy socket', {
+        heartbeatUnhealthyCount += 1;
+        logWarn('[WA][HEARTBEAT] Unhealthy check', {
+          attempt: heartbeatUnhealthyCount,
+          threshold: HEARTBEAT_UNHEALTHY_THRESHOLD,
           hasSocket: Boolean(socket),
-          readyState: socket?.ws?.readyState,
+          wsReadyState: wsReady,
           lastState: lastSocketHealth?.state,
           memory: getMemoryUsage(),
           cpu: getCpuUsage(),
         });
-        reconnectSocket('heartbeat_unhealthy', null).catch((error) => logError('heartbeat reconnect failed', { error: error?.message || error }));
+
+        if (heartbeatUnhealthyCount >= HEARTBEAT_UNHEALTHY_THRESHOLD) {
+          logWarn('[WA][HEARTBEAT] Threshold reached; scheduling reconnect', { heartbeatUnhealthyCount });
+          heartbeatUnhealthyCount = 0;
+          reconnectSocket('heartbeat_unhealthy', null).catch((error) => logError('heartbeat reconnect failed', { error: error?.message || error }));
+        }
         return;
       }
 
-      logInfo('[WA][HEARTBEAT] Healthy', { readyState: socket.ws.readyState, memory: getMemoryUsage(), cpu: getCpuUsage() });
+      // healthy
+      heartbeatUnhealthyCount = 0;
+      logInfo('[WA][HEARTBEAT] Healthy', { wsReadyState: wsReady, memory: getMemoryUsage(), cpu: getCpuUsage() });
       lastSocketHealth = { timestamp: now, state: 'healthy' };
     }, HEARTBEAT_INTERVAL_MS);
   }
@@ -639,14 +674,28 @@ process.on('unhandledRejection', (reason) => {
 process.on('SIGINT', async () => {
   isShuttingDown = true;
   logInfo('SIGINT received; shutting down gracefully');
-  await stopSocket('sigint');
+  try {
+    await stopSocket('sigint');
+    if (server && typeof server.close === 'function') {
+      server.close(() => logInfo('HTTP server closed (SIGINT)'));
+    }
+  } catch (err) {
+    logError('Error during SIGINT shutdown', { error: err?.message || err });
+  }
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   isShuttingDown = true;
   logInfo('SIGTERM received; shutting down gracefully');
-  await stopSocket('sigterm');
+  try {
+    await stopSocket('sigterm');
+    if (server && typeof server.close === 'function') {
+      server.close(() => logInfo('HTTP server closed (SIGTERM)'));
+    }
+  } catch (err) {
+    logError('Error during SIGTERM shutdown', { error: err?.message || err });
+  }
   process.exit(0);
 });
 
@@ -654,4 +703,3 @@ start().catch((error) => {
   logError('Fatal start() error', { message: error?.message, stack: error?.stack });
   reconnectSocket('startup_failed', null).catch((reconnectError) => logError('Startup reconnect failed', { error: reconnectError?.message || reconnectError }));
 });
-
