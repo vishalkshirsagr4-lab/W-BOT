@@ -4,6 +4,8 @@ dotenv.config();
 const axios = require('axios');
 const express = require('express');
 const dns = require('dns');
+const fs = require('fs');
+const path = require('path');
 const NodeCache = require('node-cache');
 
 const pino = require('pino');
@@ -33,7 +35,8 @@ const BOT_PREFIX = process.env.BOT_PREFIX || '/';
 const MAX_MESSAGE_LENGTH = Number(process.env.MAX_MESSAGE_LENGTH || '4000');
 
 // Baileys auth state directory (multi-file)
-const AUTH_DIR = process.env.WA_AUTH_DIR || './.baileys_auth';
+const AUTH_DIR = path.resolve(process.env.WA_AUTH_DIR || './.baileys_auth');
+const AUTH_STATE_FILE = path.join(AUTH_DIR, 'auth-state.json');
 
 // Rate limiting
 const RATE_LIMIT_WINDOW_MS = 10_000;
@@ -49,13 +52,25 @@ const aiResponseCache = new NodeCache({ stdTTL: 10 * 60, checkperiod: 60 }); // 
 // Prevent parallel AI work per sender (keeps latency stable)
 const inFlightBySender = new Map();
 
-
+const RECONNECT_BASE_DELAY_MS = Number(process.env.RECONNECT_BASE_DELAY_MS || '3000');
+const RECONNECT_MAX_DELAY_MS = Number(process.env.RECONNECT_MAX_DELAY_MS || '60000');
+const RECONNECT_MAX_ATTEMPTS = Number(process.env.RECONNECT_MAX_ATTEMPTS || '20');
+const HEARTBEAT_INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_MS || '30000');
 const WHATSAPP_API_ENDPOINT = FASTAPI_URL ? `${FASTAPI_URL}/api/v1/whatsapp/message` : '';
 const FASTAPI_HTTP_TIMEOUT_MS = Number(process.env.FASTAPI_TIMEOUT_MS || '8000');
 const fastApiHttpClient = axios.create({
   timeout: FASTAPI_HTTP_TIMEOUT_MS,
   headers: { 'Content-Type': 'application/json' },
 });
+
+let socket = null;
+let authState = null;
+let reconnectTimer = null;
+let heartbeatTimer = null;
+let reconnectAttempts = 0;
+let isReconnecting = false;
+let isShuttingDown = false;
+let lastSocketHealth = null;
 
 // ---------- Logging helpers ----------
 function logInfo(msg, obj) {
@@ -69,6 +84,37 @@ function logWarn(msg, obj) {
 function logError(msg, obj) {
   if (obj !== undefined) console.error(`[WA][ERROR] ${msg}`, obj);
   else console.error(`[WA][ERROR] ${msg}`);
+}
+
+function getMemoryUsage() {
+  const usage = process.memoryUsage();
+  return {
+    rssMB: Math.round(usage.rss / 1024 / 1024),
+    heapUsedMB: Math.round(usage.heapUsed / 1024 / 1024),
+    heapTotalMB: Math.round(usage.heapTotal / 1024 / 1024),
+  };
+}
+
+function getCpuUsage() {
+  const usage = process.cpuUsage();
+  return {
+    userMS: usage.user,
+    systemMS: usage.system,
+  };
+}
+
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+function clearHeartbeatTimer() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
 }
 
 function isRateLimited(senderId) {
@@ -269,71 +315,236 @@ function extractMessageText(m) {
   return '';
 }
 
+async function ensureAuthDir() {
+  try {
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
+    const tempFile = path.join(AUTH_DIR, '.write-test');
+    fs.writeFileSync(tempFile, 'ok');
+    fs.unlinkSync(tempFile);
+  } catch (error) {
+    logError('Auth directory unavailable', { error: error?.message || error });
+  }
+}
+
+async function saveStateSafely(saveCreds) {
+  try {
+    if (typeof saveCreds === 'function') {
+      await saveCreds();
+    }
+    if (authState?.creds) {
+      const statePath = path.join(AUTH_DIR, 'creds.json');
+      fs.writeFileSync(statePath, JSON.stringify(authState.creds, null, 2));
+    }
+  } catch (error) {
+    logError('Failed to save auth state', { error: error?.message || error });
+  }
+}
+
+function shouldReconnect(reason, lastDisconnect) {
+  if (isShuttingDown) return false;
+  if (reason === 'logout') return false;
+  if (lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut) return false;
+  if (lastDisconnect?.error?.output?.statusCode === DisconnectReason.connectionReplaced) return true;
+  if (reason === 'connection_replaced') return true;
+  if (reason === 'network_lost' || reason === 'stream_error' || reason === 'restart_required' || reason === 'timeout') return true;
+  return true;
+}
+
+function getReconnectDelay(attempt) {
+  const capped = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1), RECONNECT_MAX_DELAY_MS);
+  return capped + Math.floor(Math.random() * 1000);
+}
+
+async function stopSocket(reason = 'shutdown') {
+  clearReconnectTimer();
+  clearHeartbeatTimer();
+
+  if (socket) {
+    try {
+      logWarn('Stopping existing socket', { reason });
+      socket.ev.removeAllListeners?.();
+      await socket.ws?.close?.();
+    } catch (error) {
+      logWarn('Socket stop warning', { error: error?.message || error });
+    }
+    socket = null;
+  }
+}
+
+async function reconnectSocket(reason = 'unknown', lastDisconnect) {
+  if (isShuttingDown || isReconnecting) return;
+  if (!shouldReconnect(reason, lastDisconnect)) {
+    logInfo('Reconnect skipped', { reason, statusCode: lastDisconnect?.error?.output?.statusCode });
+    return;
+  }
+
+  isReconnecting = true;
+  reconnectAttempts += 1;
+  const attempt = reconnectAttempts;
+  const delay = getReconnectDelay(attempt);
+
+  logWarn('Reconnect scheduled', { attempt, reason, delayMs: delay, memory: getMemoryUsage() });
+
+  clearReconnectTimer();
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    try {
+      logInfo('Reconnect started', { attempt, reason });
+      await stopSocket('reconnect');
+      await start();
+    } catch (error) {
+      logError('Reconnect failed', { attempt, error: error?.message || error, stack: error?.stack });
+      if (attempt < RECONNECT_MAX_ATTEMPTS) {
+        isReconnecting = false;
+        reconnectSocket('retry_failed', null);
+      } else {
+        logError('Max reconnect attempts reached; exiting', { attempt });
+        process.exit(1);
+      }
+    }
+  }, delay);
+}
+
 async function start() {
-  logInfo('Starting Baileys socket...');
+  if (isShuttingDown) return;
+  if (socket) {
+    logInfo('Socket already exists; skipping duplicate start');
+    return;
+  }
+
+  logInfo('Starting Baileys socket...', { authDir: AUTH_DIR, memory: getMemoryUsage() });
+
+  await ensureAuthDir();
 
   const logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'info' });
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  authState = state;
 
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
     logger,
-
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
     version,
-    // group-friendly defaults
-    // Browsers is safe; Render doesn't require any browser
     browser: Browsers.ubuntu('Chrome'),
     syncFullHistory: false,
     markOnlineOnConnect: true,
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  socket = sock;
+  isReconnecting = false;
+  lastSocketHealth = { timestamp: Date.now(), state: 'starting' };
 
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
+  sock.ev.on('creds.update', async () => {
+    try {
+      await saveCreds();
+      logInfo('[WA][AUTH] Credentials saved');
+    } catch (error) {
+      logError('[WA][AUTH] Credentials save failed', { error: error?.message || error });
+    }
+  });
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr, receivedPendingNotifications, isOnline, isNewLogin } = update;
 
     if (qr) {
       try {
-        // Cloud-friendly QR: data URL that you can open in a browser.
-        // Render native logs often corrupt terminal ASCII QR.
         const qrcode = require('qrcode');
-        qrcode
-          .toDataURL(qr, { errorCorrectionLevel: 'M', margin: 1, scale: 6 })
-          .then((dataUrl) => {
-            logInfo('[WA][QR] Scan QR from this data URL (open in browser):', { dataUrl });
-          })
-          .catch((e) => {
-            logError('[WA][QR] Failed to generate QR data URL', e?.message || e);
-          });
-      } catch (e) {
-        logError('[WA][QR] QR handling error', e?.message || e);
+        const dataUrl = await qrcode.toDataURL(qr, { errorCorrectionLevel: 'M', margin: 1, scale: 6 });
+        logInfo('[WA][QR] Scan QR from this data URL (open in browser):', { dataUrl });
+      } catch (error) {
+        logError('[WA][QR] QR handling error', { error: error?.message || error });
       }
     }
 
+    if (connection === 'open') {
+      reconnectAttempts = 0;
+      isReconnecting = false;
+      lastSocketHealth = { timestamp: Date.now(), state: 'open' };
+      logInfo('[WA][STATE] Connected', { isOnline, isNewLogin, receivedPendingNotifications });
+      return;
+    }
+
     if (connection === 'close') {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      logWarn('Connection closed', { shouldReconnect, lastDisconnect: lastDisconnect?.error?.message });
-      if (shouldReconnect) {
-        setTimeout(() => start().catch((e) => logError('Restart start() failed', e)), 1500);
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const reason = lastDisconnect?.error?.output?.payload?.message || lastDisconnect?.error?.message || 'unknown';
+      const shouldReconnectNow = shouldReconnect('connection_closed', lastDisconnect);
+      logWarn('[WA][STATE] Disconnected', { shouldReconnectNow, statusCode, reason });
+      if (shouldReconnectNow) {
+        await reconnectSocket('connection_closed', lastDisconnect);
       }
+    }
+  });
+
+  sock.ev.on('connection.update', (update) => {
+    if (update?.connection === 'open') {
+      logInfo('[WA][STATE] WebSocket open');
     }
   });
 
   sock.ev.on('messages.upsert', (event) => {
-    // IMPORTANT: keep this handler non-blocking; do not await FastAPI inline.
     setImmediate(() => {
-      handleUpsertEvent(sock, event).catch((e) => {
-        logError('messages.upsert outer handler error', { message: e?.message, stack: e?.stack });
+      handleUpsertEvent(sock, event).catch((error) => {
+        logError('messages.upsert outer handler error', { message: error?.message, stack: error?.stack });
       });
     });
   });
+
+  sock.ev.on('ws.close', () => {
+    logWarn('[WA][STATE] WebSocket closed');
+    reconnectSocket('websocket_closed', null).catch((error) => logError('ws.close reconnect failed', { error: error?.message || error }));
+  });
+
+  sock.ev.on('ws.error', (error) => {
+    logError('[WA][STATE] WebSocket error', { error: error?.message || error });
+    reconnectSocket('websocket_error', null).catch((error) => logError('ws.error reconnect failed', { error: error?.message || error }));
+  });
+
+  sock.ev.on('stream.error', (error) => {
+    logError('[WA][STATE] Stream error', { error: error?.message || error });
+    reconnectSocket('stream_error', null).catch((error) => logError('stream.error reconnect failed', { error: error?.message || error }));
+  });
+
+  sock.ev.on('connection.update', (update) => {
+    if (update?.connection === 'connecting') {
+      logInfo('[WA][STATE] Connecting');
+    }
+  });
+
+  sock.ev.on('connection.update', (update) => {
+    if (update?.connection === 'close') {
+      logInfo('[WA][STATE] Connection close event received');
+    }
+  });
+
+  sock.ev.on('creds.update', () => {
+    logInfo('[WA][AUTH] Auth state changed');
+  });
+
+  if (!heartbeatTimer) {
+    heartbeatTimer = setInterval(() => {
+      const now = Date.now();
+      const healthy = Boolean(socket && socket.ws && socket.ws.readyState === 1);
+      if (!healthy) {
+        logWarn('[WA][HEARTBEAT] Unhealthy socket', {
+          hasSocket: Boolean(socket),
+          readyState: socket?.ws?.readyState,
+          lastState: lastSocketHealth?.state,
+          memory: getMemoryUsage(),
+          cpu: getCpuUsage(),
+        });
+        reconnectSocket('heartbeat_unhealthy', null).catch((error) => logError('heartbeat reconnect failed', { error: error?.message || error }));
+        return;
+      }
+
+      logInfo('[WA][HEARTBEAT] Healthy', { readyState: socket.ws.readyState, memory: getMemoryUsage(), cpu: getCpuUsage() });
+      lastSocketHealth = { timestamp: now, state: 'healthy' };
+    }, HEARTBEAT_INTERVAL_MS);
+  }
 
   async function handleUpsertEvent(sock, event) {
     try {
@@ -341,34 +552,27 @@ async function start() {
 
       if (!m || !m.key) return;
 
-      // Dedup
       const msgId = m.key?.id;
       if (!msgId) return;
       if (messageCache.has(msgId)) return;
       messageCache.set(msgId, true);
 
-      // Ignore messages from self
       if (m.key?.fromMe) return;
 
       const fromJid = m.key.remoteJid;
       if (!fromJid) return;
-
-      // Best-effort: ignore broadcast/status
       if (fromJid.endsWith('@broadcast') || fromJid.endsWith('broadcast')) return;
 
       const body = extractMessageText(m);
       if (!body && !m.message?.imageMessage && !m.message?.videoMessage) return;
 
       const senderId = m.key.participant || fromJid;
-
-      // Trigger check: ONLY respond when user message contains "nezuko" (case-insensitive)
       const textForTrigger = String(body ?? '').toLowerCase();
       if (!textForTrigger.includes('nezuko')) {
         logInfo('[SKIP] No trigger', { sender: senderId });
         return;
       }
       logInfo('[TRIGGERED] Nezuko activated', { sender: senderId });
-
 
       if (isRateLimited(senderId)) {
         logWarn('Rate limited sender:', senderId);
@@ -377,23 +581,20 @@ async function start() {
 
       let pendingAckMessage = null;
 
-      // Immediately acknowledge/typing (doesn't wait for AI)
       try {
         pendingAckMessage = await sock.sendMessage(fromJid, { text: '⏳' });
-      } catch {}
+        logInfo('[WA][OUTBOUND] Ack sent', { chat: fromJid });
+      } catch (error) {
+        logWarn('[WA][OUTBOUND] Ack failed', { error: error?.message || error });
+      }
 
       const ownerHandled = await handleOwnerCommand(sock, m, body);
       if (ownerHandled) return;
 
-      const payload = await normalizeWhatsAppMessage(sock, {
+      const payload = await normalizeWhatsAppMessage(sock, { ...m, messageText: body });
+      logInfo('[WA][INBOUND] Message received', { chat: payload.chat_id, sender: payload.platform_id, length: payload.message?.length || 0 });
 
-        ...m,
-        messageText: body,
-      });
-
-      // Forward to FastAPI
       const apiRes = await forwardToFastAPI(payload);
-
       if (!apiRes) return;
       if (apiRes.status !== 'success') {
         const reason = apiRes.reason || 'unknown';
@@ -406,6 +607,7 @@ async function start() {
       try {
         if (pendingAckMessage?.key) {
           await sock.sendMessage(fromJid, { delete: pendingAckMessage.key });
+          logInfo('[WA][OUTBOUND] Ack deleted', { chat: fromJid });
         }
       } catch (deleteErr) {
         logWarn('Failed to delete pending ack message', { error: deleteErr?.message || deleteErr });
@@ -417,14 +619,39 @@ async function start() {
       }
 
       await sock.sendMessage(payload.chat_id, { text: replyText }, { quoted: m });
-    } catch (e) {
-      logError('messages.upsert handler error', { message: e?.message, stack: e?.stack });
+      logInfo('[WA][OUTBOUND] Reply sent', { chat: payload.chat_id, length: replyText.length });
+    } catch (error) {
+      logError('messages.upsert handler error', { message: error?.message, stack: error?.stack });
     }
   }
 }
 
-start().catch((e) => {
-  logError('Fatal start() error', { message: e?.message, stack: e?.stack });
-  process.exit(1);
+process.on('uncaughtException', (error) => {
+  logError('Unhandled uncaughtException', { message: error?.message, stack: error?.stack });
+  reconnectSocket('uncaught_exception', null).catch((reconnectError) => logError('uncaughtException reconnect failed', { error: reconnectError?.message || reconnectError }));
+});
+
+process.on('unhandledRejection', (reason) => {
+  logError('UnhandledPromiseRejection', { reason: reason?.message || reason });
+  reconnectSocket('unhandled_rejection', null).catch((error) => logError('unhandledRejection reconnect failed', { error: error?.message || error }));
+});
+
+process.on('SIGINT', async () => {
+  isShuttingDown = true;
+  logInfo('SIGINT received; shutting down gracefully');
+  await stopSocket('sigint');
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  isShuttingDown = true;
+  logInfo('SIGTERM received; shutting down gracefully');
+  await stopSocket('sigterm');
+  process.exit(0);
+});
+
+start().catch((error) => {
+  logError('Fatal start() error', { message: error?.message, stack: error?.stack });
+  reconnectSocket('startup_failed', null).catch((reconnectError) => logError('Startup reconnect failed', { error: reconnectError?.message || reconnectError }));
 });
 
