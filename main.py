@@ -24,6 +24,14 @@ async def lifespan(app: FastAPI):
     logger.info(f"🚀 Starting {settings.PROJECT_NAME} v{settings.VERSION}...")
     await connect_to_mongo()
 
+    # Initialize Gemini exactly once on startup (performance + avoids lazy-init spikes)
+    try:
+        from ai.chat import init_gemini_on_startup
+        await init_gemini_on_startup()
+    except Exception as e:
+        logger.exception("Gemini startup init failed: %s", e)
+
+
     # Start scheduler after DB is ready (and only in this process).
     try:
         from scheduler.tasks import start_scheduler

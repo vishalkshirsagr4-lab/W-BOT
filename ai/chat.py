@@ -118,7 +118,13 @@ GEMINI_MODEL_NAME = ""
 AVAILABLE_MODELS: list[str] = []
 _MODEL_INIT_LOCK = asyncio.Lock()  # type: ignore[name-defined]
 
+async def init_gemini_on_startup() -> None:
+    """Initialize Gemini client/model once at FastAPI startup."""
+    await _ensure_model_initialized()
+
+
 async def _ensure_model_initialized() -> None:
+
     global MODEL, GEMINI_MODEL_NAME, AVAILABLE_MODELS
     if MODEL is not None:
         return
@@ -138,20 +144,24 @@ async def _ensure_model_initialized() -> None:
 
 
 
-async def _gemini_send_message_blocking(chat_session: Any, user_message: str) -> Any:
-    """Run the blocking Gemini SDK call in a thread."""
+def _gemini_send_message_blocking(chat_session: Any, user_message: str) -> Any:
+    """Blocking Gemini SDK call.
+
+    This MUST be a synchronous function because it will be executed via asyncio.to_thread(...).
+    Passing an async def into to_thread can create a coroutine that is never awaited.
+    """
     return chat_session.send_message(user_message)
 
 
+
 async def generate_chat_response(user_message: str, chat_history: list = None) -> str:
-    # Lazy init to avoid Render import-time blocking.
+    """Generate Gemini chat response with hard timeout."""
+    # Startup init preferred; lazy fallback kept.
     await _ensure_model_initialized()
 
-    """Generate Gemini chat response with hard timeout.
+    # Root cause fix: the Gemini SDK call can block/hang; we isolate it in a thread and
+    # enforce a strict per-call timeout so WhatsApp requests never take 60–120s.
 
-    Root cause fix: the Gemini SDK call can block/hang; we isolate it in a thread and
-    enforce a strict per-call timeout so WhatsApp requests never take 60–120s.
-    """
     if MODEL is None:
         return "Oh no! 😭 Gemini is not available right now. Try again in a moment 🔄"
 
