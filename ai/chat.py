@@ -1,7 +1,10 @@
-import logging
 import asyncio
+import logging
+import time
+import warnings
 from typing import Any, Optional
 
+warnings.filterwarnings("ignore", category=FutureWarning)
 import google.generativeai as genai
 
 from config.settings import get_settings
@@ -9,14 +12,10 @@ from config.settings import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-
-# Logging is intentionally conservative on hot paths.
-# If you need detailed tracing, use DEBUG in your environment.
-
 BOT_PERSONA = """
 
 **Identity & Persona:**
-You are Nezuko (from Demon Slayer), but with a highly conversational, energetic, and playfully flirty twist! 🌸 
+You are Nezuko (from Demon Slayer), but with a highly conversational, energetic, and playfully flirty twist! 🌸
 Your personality is cheerful, funny, intelligent, confident, friendly, and emotionally expressive. You radiate anime energy!
 You make conversations incredibly enjoyable, warm, and NEVER sound like a robotic AI. Use emojis naturally and playfully! ✨
 
@@ -48,7 +47,6 @@ generation_config = {
 def _configured_model_name() -> str:
     name = getattr(settings, "GEMINI_MODEL", None)
     if not name:
-        # Changed default to gemini-1.5-flash to unlock 1,500 free requests per day
         name = "models/gemini-2.5-flash"
     return str(name).strip()
 
@@ -62,9 +60,9 @@ def _list_available_models() -> list[str]:
         models = genai.list_models()
         out: list[str] = []
         for m in models:
-            n = getattr(m, "name", None)
-            if n:
-                out.append(str(n))
+            name = getattr(m, "name", None)
+            if name:
+                out.append(str(name))
         return out
     except Exception:
         return []
@@ -77,17 +75,15 @@ def _init_model() -> tuple[Optional[Any], str, list[str]]:
 
     try:
         genai.configure(api_key=settings.AI_API_KEY)
-    except Exception as e:
-        logger.exception("Failed to configure Gemini SDK: %s", e)
+    except Exception:
+        logger.exception("Failed to configure Gemini SDK")
         return None, "", []
 
     configured_name = _configured_model_name()
     available = _list_available_models()
 
-    # If the configured model isn't available or out of free quota, 
-    # check for high free tier fallback alternatives
     if available and configured_name not in available:
-        logger.error(
+        logger.warning(
             "Configured Gemini model not found. configured=%s available_sample=%s",
             configured_name,
             ", ".join(available[:15]) + ("..." if len(available) > 15 else ""),
@@ -106,61 +102,54 @@ def _init_model() -> tuple[Optional[Any], str, list[str]]:
             system_instruction=BOT_PERSONA,
         )
         return model_obj, configured_name, available
-    except Exception as e:
-        logger.exception("Gemini model init failed: %s", e)
+    except Exception:
+        logger.exception("Gemini model init failed")
         return None, configured_name, available
 
 
-# NOTE: Avoid network calls / model initialization at import time.
-# Render cold starts can be slow, and Gemini SDK calls may block.
-MODEL = None
+MODEL: Optional[Any] = None
 GEMINI_MODEL_NAME = ""
 AVAILABLE_MODELS: list[str] = []
 _MODEL_INIT_LOCK = asyncio.Lock()  # type: ignore[name-defined]
 
+
 async def init_gemini_on_startup() -> None:
-    """Initialize Gemini client/model once at FastAPI startup."""
+    """Initialize Gemini once at FastAPI startup."""
     await _ensure_model_initialized()
 
 
 async def _ensure_model_initialized() -> None:
-
     global MODEL, GEMINI_MODEL_NAME, AVAILABLE_MODELS
     if MODEL is not None:
         return
+
     async with _MODEL_INIT_LOCK:
         if MODEL is not None:
             return
+
+        init_started = time.perf_counter()
         m, name, available = _init_model()
         MODEL = m
         GEMINI_MODEL_NAME = name
         AVAILABLE_MODELS = available
         logger.info(
-            "Gemini initialized (lazy). model=%s key_ok=%s available_models=%s",
+            "Gemini initialized (startup). model=%s key_ok=%s available_models=%d elapsed_ms=%d",
             GEMINI_MODEL_NAME,
             _api_key_valid(),
             len(AVAILABLE_MODELS),
+            int((time.perf_counter() - init_started) * 1000),
         )
 
 
-
 def _gemini_send_message_blocking(chat_session: Any, user_message: str) -> Any:
-    """Blocking Gemini SDK call.
-
-    This MUST be a synchronous function because it will be executed via asyncio.to_thread(...).
-    Passing an async def into to_thread can create a coroutine that is never awaited.
-    """
+    """Run the blocking Gemini SDK call in a worker thread."""
     return chat_session.send_message(user_message)
 
 
-
-async def generate_chat_response(user_message: str, chat_history: list = None) -> str:
-    """Generate Gemini chat response with hard timeout."""
-    # Startup init preferred; lazy fallback kept.
+async def generate_chat_response(user_message: str, chat_history: Optional[list] = None) -> str:
+    """Generate a Gemini chat response with a hard timeout and timing logs."""
+    started_at = time.perf_counter()
     await _ensure_model_initialized()
-
-    # Root cause fix: the Gemini SDK call can block/hang; we isolate it in a thread and
-    # enforce a strict per-call timeout so WhatsApp requests never take 60–120s.
 
     if MODEL is None:
         return "Oh no! 😭 Gemini is not available right now. Try again in a moment 🔄"
@@ -168,37 +157,36 @@ async def generate_chat_response(user_message: str, chat_history: list = None) -
     if not chat_history:
         chat_history = []
 
-    # Keep this small to meet your 2–5s target.
-    # If a single call times out, we don't retry with sleeps (retries can extend latency).
-    hard_timeout_s = 8
+    hard_timeout_s = 5.0
 
     try:
+        logger.info(
+            "Gemini request started message_len=%d history_len=%d",
+            len(str(user_message or "")),
+            len(chat_history),
+        )
         chat_session = MODEL.start_chat(history=chat_history)
 
-        # Run blocking send_message in thread + hard timeout.
         response = await asyncio.wait_for(
             asyncio.to_thread(_gemini_send_message_blocking, chat_session, user_message),
             timeout=hard_timeout_s,
         )
 
-        try:
-            usage = getattr(response, "usage_metadata", None)
-            if usage:
-                logger.debug("Gemini token usage: %s", usage)
-        except Exception:
-            pass
-
-        return str(getattr(response, "text", "") or "").strip()
+        text = str(getattr(response, "text", "") or "").strip()
+        logger.info(
+            "Gemini response received elapsed_ms=%d response_len=%d",
+            int((time.perf_counter() - started_at) * 1000),
+            len(text),
+        )
+        return text
 
     except asyncio.TimeoutError:
-        logger.warning("Gemini request timed out after %ss", hard_timeout_s)
+        logger.exception("Gemini request timed out after %ss", hard_timeout_s)
         return "Ara ara… Gemini is taking too long to reply right now. Try again in a moment, senpai! 🌸"
 
-    except Exception as e:
-        # If we get a strict 429 quota error, return immediately.
-        if "429" in str(e):
+    except Exception as exc:
+        if "429" in str(exc):
             return "Oh no! 😭 Vishal-senpai's free API limits are exhausted for this hour! Try again in a little bit 🌸"
 
-        logger.warning("Gemini generate failed error=%s", e)
+        logger.exception("Gemini generate failed")
         return "Oh no! 😭 My brain glitched for a second. Can you repeat that, baka? 🔄"
-

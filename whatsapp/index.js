@@ -51,7 +51,11 @@ const inFlightBySender = new Map();
 
 
 const WHATSAPP_API_ENDPOINT = FASTAPI_URL ? `${FASTAPI_URL}/api/v1/whatsapp/message` : '';
-
+const FASTAPI_HTTP_TIMEOUT_MS = Number(process.env.FASTAPI_TIMEOUT_MS || '8000');
+const fastApiHttpClient = axios.create({
+  timeout: FASTAPI_HTTP_TIMEOUT_MS,
+  headers: { 'Content-Type': 'application/json' },
+});
 
 // ---------- Logging helpers ----------
 function logInfo(msg, obj) {
@@ -152,16 +156,8 @@ async function normalizeWhatsAppMessage(sock, m) {
     .replace('@g.us', '')
     .replace('@s.whatsapp.net', '') || '';
 
-  // sender name best-effort
-  let senderName = 'Unknown';
-  let profileName = '';
-  try {
-    const contact = await sock.profilePictureUrl(authorJid, 'contacts');
-    // profilePictureUrl doesn't provide name; keep unknown
-    void contact;
-  } catch {
-    // ignore
-  }
+  const senderName = 'Unknown';
+  const profileName = '';
 
   // quoted
   const quotedText = normalizeQuotedText(m);
@@ -233,8 +229,7 @@ async function forwardToFastAPI(payload, retries = 1) {
         const controller = new AbortController();
         const t = setTimeout(() => controller.abort(), timeoutMs);
 
-        const response = await axios.post(WHATSAPP_API_ENDPOINT, payload, {
-          headers: { 'Content-Type': 'application/json' },
+        const response = await fastApiHttpClient.post(WHATSAPP_API_ENDPOINT, payload, {
           signal: controller.signal,
         }).finally(() => clearTimeout(t));
 

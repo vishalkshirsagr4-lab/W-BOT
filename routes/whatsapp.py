@@ -46,7 +46,6 @@ def _message_text(payload: WhatsAppMessagePayload) -> str:
 
 
 def _is_status_or_broadcast(payload: WhatsAppMessagePayload) -> Tuple[bool, Optional[str]]:
-    # Node already best-effort filters, but keep server-side safety.
     pid = payload.platform_id or ""
     if pid.endswith("@broadcast"):
         return True, "broadcast"
@@ -55,16 +54,15 @@ def _is_status_or_broadcast(payload: WhatsAppMessagePayload) -> Tuple[bool, Opti
     return False, None
 
 
-async def _fetch_one(db, collection: str, query: dict) -> Optional[dict]:
+async def _fetch_one(db, collection: str, query: dict, projection: Optional[dict] = None) -> Optional[dict]:
     try:
-        return await db[collection].find_one(query)
+        return await db[collection].find_one(query, projection=projection)
     except Exception:
-        logger.exception("Mongo read failed")
+        logger.exception("Mongo read failed collection=%s query=%s", collection, query)
         return None
 
 
 async def _ensure_user(db, payload: WhatsAppMessagePayload, now_ts: int, text: str) -> None:
-    # Root requirement: auto upsert; never require manual insertion.
     user_update = {
         "$set": {
             "platform_id": payload.platform_id,
@@ -114,25 +112,21 @@ async def _ensure_group(db, payload: WhatsAppMessagePayload, now_ts: int) -> Non
 
 
 async def _check_blocked(db, payload: WhatsAppMessagePayload, is_group: bool) -> Optional[str]:
-    # blocked users/groups
     if is_group:
-        blocked = await _fetch_one(db, "blocked_groups", {"group_id": payload.group_id})
+        blocked = await _fetch_one(db, "blocked_groups", {"group_id": payload.group_id}, {"_id": 0, "group_id": 1})
         if blocked:
             return "blocked group"
     else:
-        blocked = await _fetch_one(db, "blocked_users", {"phone": payload.phone_number})
+        blocked = await _fetch_one(db, "blocked_users", {"phone": payload.phone_number}, {"_id": 0, "phone": 1})
         if blocked:
             return "blocked user"
     return None
 
 
 async def decide(db, payload: WhatsAppMessagePayload) -> Dict[str, Any]:
-    """Return {allowed, ai_enabled, reason, trigger_detected, reply_mode}. 
-    Note: Basic trigger and status checks are now handled prior to calling this."""
-    
+    """Return {allowed, ai_enabled, reason, trigger_detected, reply_mode}."""
     is_group = payload.is_group and bool(payload.group_id)
 
-    # Blocked Check
     blocked_reason = await _check_blocked(db, payload, is_group)
     if blocked_reason:
         return {
@@ -143,18 +137,25 @@ async def decide(db, payload: WhatsAppMessagePayload) -> Dict[str, Any]:
             "reply_mode": None,
         }
 
-    # Chat settings to decide AI enabled
-    now = int(time.time())
     if is_group:
-        group_doc = await _fetch_one(db, "groups", {"group_id": payload.group_id})
+        group_doc = await _fetch_one(
+            db,
+            "groups",
+            {"group_id": payload.group_id},
+            {"_id": 0, "reply_mode": 1, "ai_enabled": 1},
+        )
         reply_mode = str(group_doc.get("reply_mode", "Always")) if group_doc else "Always"
         ai_enabled = bool(group_doc.get("ai_enabled", True)) if group_doc else True
     else:
-        chat_setting = await _fetch_one(db, "chat_settings", {"chat_id": payload.chat_id})
+        chat_setting = await _fetch_one(
+            db,
+            "chat_settings",
+            {"chat_id": payload.chat_id},
+            {"_id": 0, "reply_mode": 1, "ai_on": 1},
+        )
         reply_mode = str(chat_setting.get("reply_mode", "Always")) if chat_setting else "Always"
         ai_enabled = bool(chat_setting.get("ai_on", True)) if chat_setting else True
 
-    # Disabled chats
     if not ai_enabled:
         return {
             "allowed": False,
@@ -164,7 +165,6 @@ async def decide(db, payload: WhatsAppMessagePayload) -> Dict[str, Any]:
             "reply_mode": reply_mode,
         }
 
-    # All checks passed
     return {
         "allowed": True,
         "ai_enabled": True,
@@ -176,119 +176,62 @@ async def decide(db, payload: WhatsAppMessagePayload) -> Dict[str, Any]:
 
 @router.post("/message")
 async def receive_whatsapp_message(payload: WhatsAppMessagePayload, db=Depends(get_db)):
-
-    start = time.perf_counter()
-
-    request_deadline_s = 20  # hard cap for this endpoint
-
-    # Hard safety: if we somehow run long, we still return quickly.
-    total_deadline = start + request_deadline_s
-
-    def remaining_ms() -> int:
-        return max(0, int((total_deadline - time.perf_counter()) * 1000))
-
-    logger.debug('[WA][REQ] Request received')
-
-    logger.debug('[WA][REQ] Request validation complete')
+    started_at = time.perf_counter()
+    logger.info("[WA][REQ] received chat_id=%s platform_id=%s", payload.chat_id, payload.platform_id)
 
     try:
-
-
-
-        # 1. Safety slice for extreme lengths
-        step_t0 = time.perf_counter()
+        step_started = time.perf_counter()
         text = _message_text(payload)
-        logger.info('[WA][TIMING] Request validation/message normalization in_ms=%s', int((time.perf_counter()-step_t0)*1000))
+        logger.info("[WA][TIMING] validation_ms=%d", int((time.perf_counter() - step_started) * 1000))
 
         if payload.message and len(payload.message) > MAX_MESSAGE_LENGTH_FALLBACK:
             payload.message = payload.message[:MAX_MESSAGE_LENGTH_FALLBACK]
             text = _message_text(payload)
 
-        # ==========================================
-        # ⚡ FAST-FAIL FILTERS (ZERO DATABASE USAGE)
-        # ==========================================
-        
-        # A. Status/broadcast early rejection
         is_sb, sb_reason = _is_status_or_broadcast(payload)
         if is_sb:
+            logger.info("[WA][TIMING] ignored_status_ms=%d", int((time.perf_counter() - started_at) * 1000))
             return {"status": "ignored", "reason": sb_reason}
 
-        # B. Trigger detection early rejection
         lower = text.lower()
         trigger_word = "nezuko" in lower
         direct_reply = bool(payload.quoted_text) and ("nezuko" in str(payload.quoted_text).lower())
         trigger_detected = trigger_word or direct_reply
-
-        # If Nezuko is not mentioned, stop immediately. No DB writes!
         if not trigger_detected:
-            return {
-                "status": "ignored",
-                "reason": "no trigger word",
-            }
-            
-        # ==========================================
-        # 💾 DATABASE OPERATIONS (ONLY IF TRIGGERED)
-        # ==========================================
+            logger.info("[WA][TIMING] ignored_trigger_ms=%d", int((time.perf_counter() - started_at) * 1000))
+            return {"status": "ignored", "reason": "no trigger word"}
 
         now_ts = payload.timestamp or int(time.time())
         is_group = payload.is_group and bool(payload.group_id)
 
-        # Register user and group ONLY because they actually triggered the bot
-        step_t0 = time.perf_counter()
+        step_started = time.perf_counter()
         await _ensure_user(db, payload, now_ts, text)
-        logger.info('[WA][TIMING] Mongo ensure_user in_ms=%s', int((time.perf_counter()-step_t0)*1000))
+        logger.info("[WA][TIMING] mongo_user_upsert_ms=%d", int((time.perf_counter() - step_started) * 1000))
 
         if is_group:
-            step_t0 = time.perf_counter()
+            step_started = time.perf_counter()
             await _ensure_group(db, payload, now_ts)
-            logger.info('[WA][TIMING] Mongo ensure_group in_ms=%s', int((time.perf_counter()-step_t0)*1000))
+            logger.info("[WA][TIMING] mongo_group_upsert_ms=%d", int((time.perf_counter() - step_started) * 1000))
 
-        # Check blocklists and chat settings
-        step_t0 = time.perf_counter()
+        step_started = time.perf_counter()
         decision = await decide(db, payload)
-        logger.info('[WA][TIMING] Mongo decision/reads in_ms=%s', int((time.perf_counter()-step_t0)*1000))
-
-
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-
-        logger.info(
-            "[WA] Incoming message decision sender=%s chat_id=%s group=%s trigger=%s ai_enabled=%s reply_mode=%s decision=%s reason=%s model=%s elapsed_ms=%s",
-            payload.sender_name,
-            payload.chat_id,
-            payload.group_id if is_group else None,
-            True,  # Trigger is always true if it reaches here
-            decision.get("ai_enabled"),
-            decision.get("reply_mode"),
-            decision.get("allowed"),
-            decision.get("reason"),
-            "gemini",
-            elapsed_ms,
-        )
+        logger.info("[WA][TIMING] mongo_decision_ms=%d", int((time.perf_counter() - step_started) * 1000))
 
         if not decision.get("allowed"):
-            return {
-                "status": "ignored",
-                "reason": str(decision.get("reason") or "unknown"),
-            }
+            logger.info("[WA][TIMING] decision_blocked_ms=%d", int((time.perf_counter() - started_at) * 1000))
+            return {"status": "ignored", "reason": str(decision.get("reason") or "unknown")}
 
-        if not decision.get("ai_enabled"):
-            return {
-                "status": "ignored",
-                "reason": "AI disabled",
-            }
-
-        # ==========================================
-        # 🤖 AI GENERATION
-        # ==========================================
-
-        reply = await generate_chat_response(payload.message, [])
+        step_started = time.perf_counter()
+        reply = await generate_chat_response(text, [])
         reply = (str(reply) if reply is not None else "").strip()[:4000]
+        logger.info("[WA][TIMING] gemini_ms=%d", int((time.perf_counter() - step_started) * 1000))
+        logger.info("[WA][TIMING] total_ms=%d", int((time.perf_counter() - started_at) * 1000))
 
         return {"status": "success", "reply": reply}
 
     except HTTPException:
         raise
     except Exception:
-        logger.exception("WhatsApp message handling failed")
+        logger.exception("WhatsApp message handling failed after_ms=%d", int((time.perf_counter() - started_at) * 1000))
         raise HTTPException(status_code=500, detail="WhatsApp integration error")
 
