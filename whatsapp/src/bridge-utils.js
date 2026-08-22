@@ -1,6 +1,17 @@
 const DEFAULT_TTL_MS = 60_000;
 const DEFAULT_MAX_ENTRIES = 5_000;
 
+const GLOBAL_COMMANDS = new Set([
+  '/cricket', '/live', '/score', '/dw', '/tts', '/vc', '/voice',
+  '/help', '/register', '/login', '/game', '/study', '/user', '/utils', '/admin',
+]);
+
+function isGlobalCommand(text) {
+  const normalized = String(text || '').trim().toLowerCase();
+  const command = normalized.split(/\s+/, 1)[0];
+  return GLOBAL_COMMANDS.has(command);
+}
+
 function normalizeWebhookPayload(payload) {
   const entry = payload?.entry?.[0];
   const changes = entry?.changes?.[0];
@@ -206,6 +217,7 @@ function getBackoffDelay(attempt) {
 }
 
 module.exports = {
+  isGlobalCommand,
   normalizeMessagePayload,
   normalizeWebhookPayload,
   createMessageDeduper,

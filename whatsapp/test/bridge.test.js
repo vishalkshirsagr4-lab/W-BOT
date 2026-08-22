@@ -8,6 +8,7 @@ const {
   shouldProcessMessage,
   isTransientFailure,
   getBackoffDelay,
+  isGlobalCommand,
 } = require('../src/bridge-utils');
 const FastApiClient = require('../src/fastapi');
 const WhatsAppBridge = require('../src/whatsapp-bridge');
@@ -64,6 +65,30 @@ test('self messages are allowed when explicitly enabled for development testing'
 test('normalized payloads with a message field are processed correctly', () => {
   const normalizedMessage = { fromMe: true, isStatus: false, isBroadcast: false, message: 'Nezuko help' };
   assert.equal(shouldProcessMessage(normalizedMessage, { allowSelfMessages: true }), true);
+});
+
+test('cricket slash commands are recognized as global commands', () => {
+  for (const command of [
+    '/live',
+    '/LIVE',
+    '  /cricket  ',
+    '/score',
+    '/score india',
+    '/cricket subscribe',
+    '/cricket subscribe india',
+    '/cricket unsubscribe',
+  ]) {
+    assert.equal(isGlobalCommand(command), true, command);
+  }
+  assert.equal(isGlobalCommand('/help'), true);
+  assert.equal(isGlobalCommand('/game meme'), true);
+});
+
+test('ordinary messages are not recognized as global commands', () => {
+  assert.equal(isGlobalCommand('hello'), false);
+  assert.equal(isGlobalCommand('what is the weather'), false);
+  assert.equal(isGlobalCommand('live cricket'), false);
+  assert.equal(isGlobalCommand('/unknown'), false);
 });
 
 test('loop guard suppresses repeated inbound messages and self-replies', () => {

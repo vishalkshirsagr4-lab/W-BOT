@@ -5,7 +5,7 @@ const { DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/bai
 const { getEnv, getIntEnv, getBoolEnv } = require('./config');
 const logger = require('./logger');
 const { generateQrDataUrl, generateQrPngBuffer, generateQrSvgBuffer, printQrToTerminal } = require('./qr-utils');
-const { createMessageDeduper, normalizeMessagePayload, shouldProcessMessage } = require('./bridge-utils');
+const { createMessageDeduper, normalizeMessagePayload, shouldProcessMessage, isGlobalCommand } = require('./bridge-utils');
 const FastApiClient = require('./fastapi');
 
 class BaileysClient {
@@ -242,6 +242,11 @@ class BaileysClient {
         'Incoming Baileys message received'
       );
 
+      const isRecognizedGlobalCommand = isGlobalCommand(normalized.message);
+      if (isRecognizedGlobalCommand) {
+        logger.info({ chatId: normalized.chat_id, messageText: normalized.message }, 'Recognized global command');
+      }
+
       if (!shouldProcessMessage(normalized, { allowSelfMessages: this.allowSelfMessages })) {
         logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: normalized.message }, 'Baileys message ignored by bridge filter');
         return;
@@ -266,9 +271,13 @@ class BaileysClient {
         return;
       }
 
-      if (!/nezuko/i.test(normalized.message || '') && !/nezuko/i.test(String(normalized.quoted_text || ''))) {
+      if (!isRecognizedGlobalCommand && !/nezuko/i.test(normalized.message || '') && !/nezuko/i.test(String(normalized.quoted_text || ''))) {
         logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: normalized.message }, 'Baileys message ignored because it did not mention Nezuko');
         return;
+      }
+
+      if (isRecognizedGlobalCommand) {
+        logger.info({ chatId: normalized.chat_id, messageText: normalized.message }, 'Forwarding command to bridge handler');
       }
 
       const dedupeKey = normalized.raw_message_id || `${normalized.chat_id}:${normalized.timestamp}`;
