@@ -1,11 +1,15 @@
 import logging
+import os
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timezone
 
 from backend.database.connection import db_instance
 from backend.services.nezuko import prune_expired_conversations
+from backend.services.cricket_service import get_cricket_service, is_live_match, match_matches_team, _format_match
+from backend.services.http_client import get_shared_http_client
 
 logger = logging.getLogger(__name__)
+_previous_cricket_state: dict[tuple[str, str], str] = {}
 
 # Initialize the scheduler
 scheduler = AsyncIOScheduler()
@@ -60,12 +64,52 @@ async def cleanup_conversations():
     if deleted:
         logger.info("🧹 Pruned %d expired conversation records", deleted)
 
+
+async def process_cricket_alerts():
+    """Poll once for all enabled subscribers and notify only changed matches."""
+    if db_instance.db is None:
+        return
+    subscriptions = await db_instance.db["cricket_subscriptions"].find(
+        {"feature": "cricket", "enabled": True}
+    ).to_list(length=500)
+    if not subscriptions:
+        return
+
+    service = get_cricket_service()
+    matches = [match for match in await service.fetch_matches() if is_live_match(match)]
+    if not matches:
+        return
+    bridge_url = os.environ.get("WHATSAPP_BRIDGE_INTERNAL_URL", "http://localhost:10000/internal/send_media")
+    for subscription in subscriptions:
+        chat_id = subscription.get("chat_id")
+        if not chat_id:
+            continue
+        team = subscription.get("team")
+        selected = [match for match in matches if not team or match_matches_team(match, str(team))]
+        for match in selected:
+            match_id = str(match.get("id") or match.get("name") or "unknown")
+            fingerprint = repr((match.get("status"), match.get("score")))
+            state_key = (str(chat_id), match_id)
+            previous = _previous_cricket_state.get(state_key)
+            _previous_cricket_state[state_key] = fingerprint
+            if previous is None or previous == fingerprint:
+                continue
+            try:
+                await get_shared_http_client().post(
+                    bridge_url,
+                    json={"to": chat_id, "text": f"🏏 LIVE UPDATE\n\n{_format_match(match)}"},
+                    timeout=10.0,
+                )
+            except Exception:
+                logger.exception("cricket alert delivery failed chat_id=%s", chat_id)
+
 def start_scheduler():
     """Starts the background clock! 🕰️"""
     # Add our jobs
     scheduler.add_job(process_reminders, 'interval', minutes=1, id='check_reminders_job')
     scheduler.add_job(daily_morning_routine, 'cron', hour=8, minute=0, id='morning_routine_job')
     scheduler.add_job(cleanup_conversations, 'interval', hours=1, id='cleanup_conversations_job')
+    scheduler.add_job(process_cricket_alerts, 'interval', seconds=60, id='cricket_alerts_job', max_instances=1, coalesce=True)
     
     scheduler.start()
     logger.info("⏱️ Background Scheduler started successfully! The bot never sleeps. 🦾")

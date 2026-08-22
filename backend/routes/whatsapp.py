@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from backend.ai.chat import generate_chat_response
 from backend.database.connection import get_db
 from backend.services.commands import handle_nezuko_command
+from backend.services.cricket_service import handle_cricket_request, is_cricket_request
 from backend.services.nezuko import is_authorized_admin, should_trigger_nezuko, sanitize_text
 from backend.services import download_manager
 from backend.services import tts_service
@@ -153,6 +154,9 @@ async def _notify_tts_failure(http_client, chat_id: str, text: str) -> None:
 async def _handle_slash_command(request: Request, db, payload: WhatsAppMessagePayload, text: str) -> Optional[dict]:
     command = text.strip()
     lowered = command.lower()
+
+    if is_cricket_request(command):
+        return {"status": "success", "reply": await handle_cricket_request(command, db, payload.model_dump())}
 
     tts_alias = next((alias for alias in ("/tts", "/vc", "/voice") if lowered == alias or lowered.startswith(f"{alias} ")), None)
     if tts_alias:
@@ -609,7 +613,7 @@ async def receive_whatsapp_message(request: Request, payload: WhatsAppMessagePay
         trigger_word = should_trigger_nezuko(text)
         direct_reply = bool(payload.quoted_text) and should_trigger_nezuko(str(payload.quoted_text))
         command_trigger = _is_command(text)
-        trigger_detected = trigger_word or direct_reply or command_trigger
+        trigger_detected = trigger_word or direct_reply or command_trigger or is_cricket_request(text)
         if not trigger_detected:
             logger.info("[WA][TIMING] ignored_trigger_ms=%d", int((time.perf_counter() - started_at) * 1000))
             return {"status": "ignored", "reason": "no trigger word"}
@@ -637,6 +641,11 @@ async def receive_whatsapp_message(request: Request, payload: WhatsAppMessagePay
             if command_result is not None:
                 logger.info("[WA][TIMING] command_ms=%d", int((time.perf_counter() - started_at) * 1000))
                 return {"status": "success", "reply": command_result["reply"]}
+
+        if is_cricket_request(text):
+            reply = await handle_cricket_request(text, db, payload.model_dump())
+            logger.info("[WA][TIMING] cricket_ms=%d", int((time.perf_counter() - started_at) * 1000))
+            return {"status": "success", "reply": reply}
 
         if should_trigger_nezuko(text) or bool(payload.quoted_text and should_trigger_nezuko(str(payload.quoted_text))):
             command_result = await handle_nezuko_command(db, payload.model_dump(), text)

@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     AI_API_KEY: str | None = None
     OPENROUTER_API_KEY: str | None = None
     WEATHER_API_KEY: str = ""
+    CRICKET_API_KEY: str | None = None
     GEMINI_MODEL: str | None = None
 
     # Nezuko Assistant
