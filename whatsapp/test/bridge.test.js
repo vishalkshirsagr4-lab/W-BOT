@@ -106,6 +106,20 @@ test('admin commands support natural and slash syntax with lid and phone JIDs', 
   assert.equal(isAuthorizedAdmin({ senderJid: '99999@s.whatsapp.net', configuredJids: '12345@lid' }).jidMatched, false);
 });
 
+test('exact configured ADMIN_JIDS match authorizes before phone resolution', () => {
+  const result = isAuthorizedAdmin({
+    senderJid: ' 111892538339464@LID ',
+    resolvedPhoneNumber: '9188615918380',
+    configuredJids: '111892538339464@lid',
+    adminPhoneNumbers: '918861591838',
+    ownerNumber: '918861591838',
+  });
+
+  assert.equal(result.jidMatched, true);
+  assert.equal(result.authorized, true);
+  assert.equal(result.phoneMatched, false);
+});
+
 test('admin authorization resolves an LID to the configured Indian phone number', async () => {
   const sock = { signalRepository: { lidMapping: { getPNForLID: async () => '8861591838@s.whatsapp.net' } } };
   const identity = await resolveLidIdentity(sock, '111892538339464@lid');

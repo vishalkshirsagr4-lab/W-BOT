@@ -75,6 +75,17 @@ function isAuthorizedAdmin({ senderJid, resolvedPhoneNumber = '', resolvedJid = 
   const normalizedJid = normalizeJid(senderJid);
   const configuredJidSet = new Set(String(configuredJids || '').split(',').map(normalizeJid).filter(Boolean));
   const jidMatched = configuredJidSet.has(normalizedJid);
+  if (jidMatched) {
+    return {
+      authorized: true,
+      normalizedJid,
+      resolvedJid: normalizeJid(resolvedJid || resolvedPhoneNumber),
+      resolvedPhone: normalizePhoneNumber(resolvedPhoneNumber),
+      jidMatched: true,
+      phoneMatched: false,
+      ownerMatched: false,
+    };
+  }
   const configuredAdminPhones = String(adminPhoneNumbers || '')
     .split(',')
     .map((value) => normalizePhoneNumber(value))
