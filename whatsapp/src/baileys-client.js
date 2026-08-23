@@ -383,10 +383,17 @@ class BaileysClient {
     }
 
     const forwardPayload = {
-      platform_id: 'whatsapp',
+      platform_id: normalized.platform_id || normalized.phone_number || normalized.chat_id,
+      phone_number: normalized.phone_number || normalized.platform_id || '',
+      sender_name: normalized.sender_name || '',
+      profile_name: normalized.profile_name || '',
       chat_id: normalized.chat_id,
       message: normalized.message,
       timestamp: Math.floor(Date.now() / 1000),
+      quoted_text: normalized.quoted_text || null,
+      is_group: Boolean(normalized.is_group),
+      group_id: normalized.group_id || null,
+      group_name: normalized.group_name || null,
     };
 
     logger.info({ chatId: normalized.chat_id, messageText: normalized.message }, 'Forwarding Baileys inbound message to FastAPI');

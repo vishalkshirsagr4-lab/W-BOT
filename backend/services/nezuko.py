@@ -110,19 +110,24 @@ async def get_conversation_history(db: Any, chat_id: str, phone_number: str) -> 
         doc = await db["conversations"].find_one({"chat_id": chat_id})
         if not doc:
             return []
-        return list(doc.get("messages", [])[-12:])
+        return list(doc.get("messages", [])[-int(getattr(settings, "CONVERSATION_MAX_MESSAGES", 200)):])
     except Exception:
         logger.exception("Failed to load conversation history chat_id=%s", chat_id)
         return []
 
 
 async def save_conversation_history(db: Any, chat_id: str, phone_number: str, user_message: str, reply: str) -> None:
-    """Persist the latest exchange to MongoDB with a short TTL-like expiry window."""
+    """Persist recent exchanges without allowing a chat document to grow forever."""
     if db is None:
         return
     try:
         now = int(time.time())
-        expires_at = now + int(getattr(settings, "CONVERSATION_TTL_SECONDS", 60 * 60 * 24 * 7))
+        expires_at = datetime.fromtimestamp(
+            now + int(getattr(settings, "CONVERSATION_TTL_SECONDS", 60 * 60 * 24 * 7)),
+            tz=timezone.utc,
+        )
+        max_messages = max(2, int(getattr(settings, "CONVERSATION_MAX_MESSAGES", 200)))
+        max_chars = max(1, int(getattr(settings, "CONVERSATION_MAX_MESSAGE_CHARS", 12000)))
         await db["conversations"].update_one(
             {"chat_id": chat_id},
             {
@@ -135,10 +140,10 @@ async def save_conversation_history(db: Any, chat_id: str, phone_number: str, us
                 "$push": {
                     "messages": {
                         "$each": [
-                            {"role": "user", "text": sanitize_text(user_message), "timestamp": now},
-                            {"role": "assistant", "text": sanitize_text(reply), "timestamp": now},
+                            {"role": "user", "text": sanitize_text(user_message)[:max_chars], "timestamp": now},
+                            {"role": "assistant", "text": sanitize_text(reply)[:max_chars], "timestamp": now},
                         ],
-                        "$slice": -24,
+                        "$slice": -max_messages,
                     }
                 },
             },
@@ -165,8 +170,15 @@ async def prune_expired_conversations(db: Any) -> int:
     if db is None:
         return 0
     try:
-        now = int(time.time())
-        result = await db["conversations"].delete_many({"expires_at": {"$lt": now}})
+        now = datetime.now(timezone.utc)
+        result = await db["conversations"].delete_many(
+            {
+                "$or": [
+                    {"expires_at": {"$lt": now}},
+                    {"expires_at": {"$lt": int(now.timestamp())}},
+                ]
+            }
+        )
         return int(result.deleted_count or 0)
     except Exception:
         logger.exception("Failed to prune expired conversations")

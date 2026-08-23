@@ -11,6 +11,8 @@ from backend.services.http_client import close_shared_http_client
 from backend.routes.chat import router as chat_router
 from backend.routes.users import router as users_router
 from backend.routes.whatsapp import router as whatsapp_router
+from backend.routes.study import router as study_router
+from backend.routes.games import router as games_router
 
 settings = get_settings()
 logging.basicConfig(level=logging.INFO)
@@ -75,6 +77,8 @@ app.add_middleware(
 app.include_router(users_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(whatsapp_router, prefix="/api/v1")
+app.include_router(study_router, prefix="/api/v1")
+app.include_router(games_router, prefix="/api/v1")
 
 
 @app.get("/", tags=["Health"])

@@ -127,7 +127,23 @@ async def _register_or_login_user(db, payload: WhatsAppMessagePayload, name_hint
     users = _collection(db, "users")
     existing = await users.find_one(query)
     if existing:
-        await users.update_one({"_id": existing["_id"]}, {"$set": user_doc})
+        await users.update_one(
+            {"_id": existing["_id"]},
+            {
+                "$set": {
+                    "platform_id": payload.platform_id,
+                    "phone": normalized_phone or payload.phone_number or payload.platform_id,
+                    "sender_name": payload.sender_name or username,
+                    "profile_name": payload.profile_name or username,
+                    "username": username,
+                    "first_name": username,
+                    "chat_id": payload.chat_id,
+                    "last_seen": int(time.time()),
+                    "updated_at": int(time.time()),
+                    "is_admin": bool(is_authorized_admin(payload.phone_number) or is_authorized_admin(payload.platform_id)),
+                }
+            },
+        )
         return {"status": "success", "reply": f"Welcome back, {username}! Your WhatsApp profile is synced and ready. ✨"}
 
     await users.insert_one(user_doc)
@@ -548,6 +564,17 @@ async def decide(db, payload: WhatsAppMessagePayload) -> Dict[str, Any]:
             "allowed": False,
             "ai_enabled": False,
             "reason": blocked_reason,
+            "trigger_detected": True,
+            "reply_mode": None,
+        }
+
+    maintenance = await _fetch_one(db, "settings", {"_id": "maintenance"}, {"_id": 0, "enabled": 1})
+    is_admin = is_authorized_admin(payload.phone_number) or is_authorized_admin(payload.platform_id)
+    if maintenance and maintenance.get("enabled") and not is_admin:
+        return {
+            "allowed": False,
+            "ai_enabled": False,
+            "reason": "maintenance mode",
             "trigger_detected": True,
             "reply_mode": None,
         }

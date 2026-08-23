@@ -21,12 +21,12 @@ db_instance = Database()
 
 
 async def ensure_indexes() -> None:
-    """Create a small set of high-value indexes once at startup."""
+    """Create indexes for collections used by the running application."""
     if db_instance.db is None:
         return
 
     try:
-        await db_instance.db["users"].create_index([("platform_id", 1)])
+        await db_instance.db["users"].create_index([("platform_id", 1)], unique=True)
         await db_instance.db["users"].create_index([("phone", 1)])
         await db_instance.db["groups"].create_index([("group_id", 1)])
         await db_instance.db["blocked_users"].create_index([("phone", 1)])
@@ -34,6 +34,11 @@ async def ensure_indexes() -> None:
         await db_instance.db["chat_settings"].create_index([("chat_id", 1)])
         await db_instance.db["notes"].create_index([("subject", 1), ("type", 1), ("upvotes", -1)])
         await db_instance.db["reminders"].create_index([("user_id", 1), ("is_completed", 1), ("due_date", 1)])
+        await db_instance.db["conversations"].create_index([("chat_id", 1)], unique=True)
+        await db_instance.db["conversations"].create_index("expires_at", expireAfterSeconds=0)
+        await db_instance.db["cricket_subscriptions"].create_index([("chat_id", 1), ("feature", 1), ("enabled", 1)])
+        await db_instance.db["admin_actions"].create_index([("created_at", -1)])
+        await db_instance.db["announcements"].create_index([("created_at", -1)])
         logger.info("Mongo indexes ensured")
     except Exception:
         logger.exception("Failed to ensure Mongo indexes")
