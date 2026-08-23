@@ -1,5 +1,5 @@
 const dotenv = require('dotenv');
-dotenv.config({ path: require('path').resolve(__dirname, '..', '.env') });
+dotenv.config({ path: require('path').resolve(__dirname, '..', '..', '.env') });
 
 function getEnv(name, fallback = '') {
   const value = process.env[name];

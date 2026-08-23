@@ -54,12 +54,15 @@ def is_authorized_admin(phone_number: str | None) -> bool:
         return cleaned
 
     normalized = normalize(phone_number)
-    allowed = getattr(settings, "ADMIN_PHONE_NUMBERS", "") or ""
-    owner_number = getattr(settings, "OWNER_NUMBER", "") or ""
+    allowed = ",".join(
+        value for value in (
+            getattr(settings, "ADMIN_PHONE_NUMBERS", ""),
+            getattr(settings, "ADMIN_JIDS", ""),
+            getattr(settings, "OWNER_NUMBER", ""),
+        ) if value
+    )
 
-    candidates = [normalize(candidate) for candidate in allowed.split(",") if candidate.strip()]
-    if owner_number:
-        candidates.append(normalize(owner_number))
+    candidates = [normalized_candidate for candidate in allowed.split(",") if candidate.strip() for normalized_candidate in [normalize(candidate)] if normalized_candidate]
 
     return normalized in candidates
 

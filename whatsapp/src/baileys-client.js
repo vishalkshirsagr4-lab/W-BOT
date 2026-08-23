@@ -5,7 +5,7 @@ const { DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/bai
 const { getEnv, getIntEnv, getBoolEnv } = require('./config');
 const logger = require('./logger');
 const { generateQrDataUrl, generateQrPngBuffer, generateQrSvgBuffer, printQrToTerminal } = require('./qr-utils');
-const { createMessageDeduper, normalizeMessagePayload, shouldProcessMessage, isGlobalCommand } = require('./bridge-utils');
+const { createMessageDeduper, normalizeMessagePayload, shouldProcessMessage, isGlobalCommand, isAdminCommand, isAuthorizedAdminJid } = require('./bridge-utils');
 const FastApiClient = require('./fastapi');
 
 class BaileysClient {
@@ -34,9 +34,11 @@ class BaileysClient {
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = getIntEnv('WHATSAPP_MAX_RECONNECT_ATTEMPTS', 8);
     this.fastApi = new FastApiClient();
-    this.allowSelfMessages = getBoolEnv('ALLOW_SELF_MESSAGES', false);
+    this.allowSelfMessages = false;
+    this.adminJids = getEnv('ADMIN_JIDS', '');
     this.apiTimeoutMs = getIntEnv('FASTAPI_TIMEOUT_MS', 8000);
     this.messageDeduper = createMessageDeduper(getIntEnv('MESSAGE_DEDUP_TTL_MS', 60_000), getIntEnv('MESSAGE_DEDUP_MAX_ENTRIES', 5_000));
+    this.recentOutboundMessages = new Map();
   }
 
   async ensureSessionDir() {
@@ -243,11 +245,37 @@ class BaileysClient {
       );
 
       const isRecognizedGlobalCommand = isGlobalCommand(normalized.message);
+      const adminCommand = isAdminCommand(normalized.message);
+      const fromMe = Boolean(message.key?.fromMe);
+      const senderJid = fromMe
+        ? this.sock?.user?.id || normalized.platform_id
+        : message.key?.participant || message.key?.remoteJid || normalized.platform_id;
+      const outboundKey = `${normalized.chat_id}:${String(normalized.message || '').trim().toLowerCase()}`;
+      const isTrackedOutbound = fromMe && this.recentOutboundMessages.has(outboundKey);
+      const authorizedAdmin = isAuthorizedAdminJid(senderJid, this.adminJids);
+      const fromMeAdminCommand = Boolean(fromMe && adminCommand && authorizedAdmin && !isTrackedOutbound);
+      normalized.sender_jid = senderJid;
+      if (adminCommand) {
+        logger.info({ chatId: normalized.chat_id, fromMe: Boolean(message.key?.fromMe) }, 'Admin command received');
+        if (authorizedAdmin) {
+          logger.info({ chatId: normalized.chat_id, fromMe: Boolean(message.key?.fromMe) }, fromMeAdminCommand ? 'fromMe admin command accepted' : 'Admin command authorized');
+        } else {
+          logger.warn({ chatId: normalized.chat_id, senderJid }, 'Admin command rejected');
+        }
+      }
       if (isRecognizedGlobalCommand) {
         logger.info({ chatId: normalized.chat_id, messageText: normalized.message }, 'Recognized global command');
       }
 
-      if (!shouldProcessMessage(normalized, { allowSelfMessages: this.allowSelfMessages })) {
+      if (adminCommand && !authorizedAdmin) {
+        logger.warn({ chatId: normalized.chat_id }, 'Admin command rejected before FastAPI forwarding');
+        return;
+      }
+
+      if (isTrackedOutbound) {
+        this.recentOutboundMessages.delete(outboundKey);
+      }
+      if (!shouldProcessMessage(normalized, { allowSelfMessages: fromMeAdminCommand })) {
         logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: normalized.message }, 'Baileys message ignored by bridge filter');
         return;
       }
@@ -278,6 +306,9 @@ class BaileysClient {
 
       if (isRecognizedGlobalCommand) {
         logger.info({ chatId: normalized.chat_id, messageText: normalized.message }, 'Forwarding command to bridge handler');
+      }
+      if (adminCommand) {
+        logger.info({ chatId: normalized.chat_id, messageText: normalized.message }, 'Admin command forwarded to FastAPI');
       }
 
       const dedupeKey = normalized.raw_message_id || `${normalized.chat_id}:${normalized.timestamp}`;
@@ -382,9 +413,11 @@ class BaileysClient {
       return { status: 'ignored', reason: 'invalid_payload' };
     }
 
+    const senderJid = normalized.sender_jid || normalized.platform_id || normalized.phone_number || normalized.chat_id;
+    const fromMe = Boolean(normalized.fromMe);
     const forwardPayload = {
-      platform_id: normalized.platform_id || normalized.phone_number || normalized.chat_id,
-      phone_number: normalized.phone_number || normalized.platform_id || '',
+      platform_id: fromMe ? senderJid : (normalized.platform_id || normalized.chat_id || normalized.phone_number),
+      phone_number: fromMe ? String(senderJid).split('@')[0] : (normalized.phone_number || normalized.platform_id || ''),
       sender_name: normalized.sender_name || '',
       profile_name: normalized.profile_name || '',
       chat_id: normalized.chat_id,
@@ -421,6 +454,11 @@ class BaileysClient {
       throw new Error('Baileys client is not ready');
     }
     logger.info({ to, messageLength: text.length }, 'Sending outbound Baileys text');
+    const outboundKey = `${to}:${String(text || '').trim().toLowerCase()}`;
+    this.recentOutboundMessages.set(outboundKey, Date.now() + 60_000);
+    for (const [key, expiresAt] of this.recentOutboundMessages.entries()) {
+      if (expiresAt <= Date.now()) this.recentOutboundMessages.delete(key);
+    }
     const result = await this.sock.sendMessage(to, { text });
     logger.info({ to, messageLength: text.length, messageId: result?.key?.id || null }, 'Outbound Baileys text sent successfully');
     return result;

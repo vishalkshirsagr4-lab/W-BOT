@@ -9,6 +9,8 @@ const {
   isTransientFailure,
   getBackoffDelay,
   isGlobalCommand,
+  isAdminCommand,
+  isAuthorizedAdminJid,
 } = require('../src/bridge-utils');
 const FastApiClient = require('../src/fastapi');
 const WhatsAppBridge = require('../src/whatsapp-bridge');
@@ -89,6 +91,25 @@ test('ordinary messages are not recognized as global commands', () => {
   assert.equal(isGlobalCommand('what is the weather'), false);
   assert.equal(isGlobalCommand('live cricket'), false);
   assert.equal(isGlobalCommand('/unknown'), false);
+});
+
+test('admin commands support natural and slash syntax with lid and phone JIDs', () => {
+  assert.equal(isAdminCommand('Nezuko logs'), true);
+  assert.equal(isAdminCommand('/admin status'), true);
+  assert.equal(isAdminCommand('hello Nezuko'), false);
+  assert.equal(isAuthorizedAdminJid('12345@lid', '12345@lid'), true);
+  assert.equal(isAuthorizedAdminJid('12345@s.whatsapp.net', '12345@lid'), true);
+  assert.equal(isAuthorizedAdminJid('99999@s.whatsapp.net', '12345@lid'), false);
+});
+
+test('fromMe admin commands are the only self messages eligible for the narrow exception', () => {
+  const adminMessage = { fromMe: true, isOwnMessage: true, body: '/admin logs' };
+  const normalBotMessage = { fromMe: true, isOwnMessage: true, body: 'Admin status: healthy' };
+
+  assert.equal(isAdminCommand(adminMessage.body), true);
+  assert.equal(shouldProcessMessage(adminMessage, { allowSelfMessages: true }), true);
+  assert.equal(isAdminCommand(normalBotMessage.body), false);
+  assert.equal(shouldProcessMessage(normalBotMessage, { allowSelfMessages: false }), false);
 });
 
 test('loop guard suppresses repeated inbound messages and self-replies', () => {
@@ -220,7 +241,7 @@ test('BaileysClient forwards valid messages to FastAPI and sends replies over Ba
 
   assert.equal(result.status, 'success');
   assert.equal(result.reply, 'Hello from FastAPI');
-  assert.equal(forwardedPayload.platform_id, 'whatsapp');
+  assert.equal(forwardedPayload.platform_id, '919999999999@c.us');
   assert.equal(forwardedPayload.chat_id, '919999999999@c.us');
   assert.equal(forwardedPayload.message, 'Nezuko hello');
   assert.equal(typeof forwardedPayload.timestamp, 'number');

@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     CONVERSATION_MAX_MESSAGES: int = 200
     CONVERSATION_MAX_MESSAGE_CHARS: int = 12000
     ADMIN_PHONE_NUMBERS: str = "918660108587"
+    ADMIN_JIDS: str = ""
     OWNER_NUMBER: str = "918660108587"
 
     # Load from .env file

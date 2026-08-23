@@ -64,6 +64,8 @@ async def _record_admin_action(db: Any, action: str, payload: dict[str, Any], **
 
 async def _admin_command(db: Any, payload: dict[str, Any], command_text: str) -> str:
     """Execute an admin command received through the Nezuko WhatsApp flow."""
+    if command_text.lower().startswith("/admin"):
+        command_text = command_text[6:].strip()
     action, _, argument = command_text.partition(" ")
     action = action.lower()
     argument = argument.strip()
@@ -127,14 +129,15 @@ async def _admin_command(db: Any, payload: dict[str, Any], command_text: str) ->
     if action == "system" and argument == "health":
         return "System health: FastAPI is running; MongoDB and WhatsApp are available to the current process."
 
-    if action == "maintenance" and argument == "mode":
+    if action == "maintenance" and argument in {"", "mode", "on", "off"}:
+        enabled = argument != "off"
         await _collection(db, "settings").update_one(
             {"_id": "maintenance"},
-            {"$set": {"enabled": True, "updated_at": datetime.now(timezone.utc)}},
+            {"$set": {"enabled": enabled, "updated_at": datetime.now(timezone.utc)}},
             upsert=True,
         )
-        await _record_admin_action(db, "maintenance mode", payload, enabled=True)
-        return "Maintenance mode enabled. Admin commands remain available."
+        await _record_admin_action(db, "maintenance mode", payload, enabled=enabled)
+        return f"Maintenance mode {'enabled' if enabled else 'disabled'}."
 
     return "Admin commands: broadcast <message>, shutdown, restart, statistics, logs, database status, system health, maintenance mode, active users"
 
@@ -144,9 +147,20 @@ async def handle_nezuko_command(db: Any, payload: dict[str, Any], text: str) -> 
     message_text = sanitize_text(text)
     command_text = extract_command(message_text)
     normalized = command_text.lower().strip()
+    if normalized.startswith("/admin "):
+        normalized = normalized[7:].strip()
 
     if not should_trigger_nezuko(message_text):
         return {"status": "ignored", "reply": "", "reason": "no_trigger"}
+
+    admin_actions = {"shutdown", "restart", "status", "statistics", "stats", "logs", "database status", "system health", "maintenance", "maintenance mode", "active users"}
+    is_admin_command = normalized == "broadcast" or normalized.startswith("broadcast ") or normalized.startswith("/admin ") or normalized in admin_actions or normalized.startswith("maintenance ")
+    if is_admin_command:
+        if not (is_authorized_admin(payload.get("phone_number")) or is_authorized_admin(payload.get("platform_id"))):
+            return {"status": "success", "reply": "Only an authorized admin can use that command."}
+        if normalized == "status":
+            return {"status": "success", "reply": "Admin status: FastAPI is running; MongoDB and WhatsApp are available to the current process."}
+        return {"status": "success", "reply": await _admin_command(db, payload, command_text)}
 
     if normalized in {"help", "menu", "about"}:
         return {"status": "success", "reply": build_help_text()}
@@ -169,12 +183,6 @@ async def handle_nezuko_command(db: Any, payload: dict[str, Any], text: str) -> 
         summary_prompt = "Summarize the following conversation in a concise and friendly way: " + str(history[-6:])
         reply = await generate_chat_response(summary_prompt, chat_history=[])
         return {"status": "success", "reply": reply}
-
-    admin_actions = {"shutdown", "restart", "statistics", "stats", "logs", "database status", "system health", "maintenance mode", "active users"}
-    if normalized.startswith("broadcast ") or normalized in admin_actions:
-        if not (is_authorized_admin(payload.get("phone_number")) or is_authorized_admin(payload.get("platform_id"))):
-            return {"status": "success", "reply": "Only an authorized admin can use that command."}
-        return {"status": "success", "reply": await _admin_command(db, payload, command_text)}
 
     if normalized in {"translate", "translation"}:
         return {"status": "success", "reply": "Send a phrase and I can translate it for you, senpai. 🌸"}

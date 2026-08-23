@@ -449,22 +449,8 @@ async def _handle_slash_command(request: Request, db, payload: WhatsAppMessagePa
         if not is_authorized_admin(payload.phone_number) and not is_authorized_admin(payload.platform_id):
             return {"status": "error", "reply": "Only admins can use admin commands."}
 
-        action = command.split(maxsplit=2)[1].strip().lower()
-        if action == "stats":
-            users = _collection(db, "users")
-            notes = _collection(db, "notes")
-            confessions = _collection(db, "confessions")
-            polls = _collection(db, "polls")
-            user_count = await users.count_documents({})
-            note_count = await notes.count_documents({})
-            confession_count = await confessions.count_documents({})
-            poll_count = await polls.count_documents({})
-            return {
-                "status": "success",
-                "reply": f"Admin stats:\nUsers: {user_count}\nNotes: {note_count}\nConfessions: {confession_count}\nPolls: {poll_count}",
-            }
-
-        return {"status": "error", "reply": "Admin commands available: /admin stats"}
+        from backend.services.commands import handle_nezuko_command
+        return await handle_nezuko_command(db, payload.model_dump(), command)
 
     return None
 

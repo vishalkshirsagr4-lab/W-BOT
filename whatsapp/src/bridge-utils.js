@@ -6,6 +6,28 @@ const GLOBAL_COMMANDS = new Set([
   '/help', '/register', '/login', '/game', '/study', '/user', '/utils', '/admin',
 ]);
 
+function normalizeJid(value) {
+  return String(value || '').trim().toLowerCase().replace(/:\d+(?=@)/, '');
+}
+
+function jidVariants(value) {
+  const jid = normalizeJid(value);
+  if (!jid) return [];
+  const user = jid.split('@')[0];
+  const number = user.replace(/[^0-9]/g, '');
+  return [...new Set([jid, number ? `${number}@s.whatsapp.net` : '', number])].filter(Boolean);
+}
+
+function isAdminCommand(text) {
+  return /^(?:\/admin\s+(?:logs|status|statistics|stats|restart|shutdown|broadcast(?:\s|$)|maintenance(?:\s+(?:on|off))?)|nezuko\s+(?:logs|status|statistics|stats|restart|shutdown|broadcast(?:\s|$)|maintenance(?:\s+(?:on|off))?))(?:\s|$)/i.test(String(text || '').trim());
+}
+
+function isAuthorizedAdminJid(jid, configuredJids) {
+  const actual = jidVariants(jid);
+  const configured = String(configuredJids || '').split(',').flatMap(jidVariants);
+  return actual.some((candidate) => configured.includes(candidate));
+}
+
 function isGlobalCommand(text) {
   const normalized = String(text || '').trim().toLowerCase();
   const command = normalized.split(/\s+/, 1)[0];
@@ -217,6 +239,9 @@ function getBackoffDelay(attempt) {
 }
 
 module.exports = {
+  normalizeJid,
+  isAdminCommand,
+  isAuthorizedAdminJid,
   isGlobalCommand,
   normalizeMessagePayload,
   normalizeWebhookPayload,
