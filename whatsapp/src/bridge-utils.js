@@ -18,6 +18,53 @@ function jidVariants(value) {
   return [...new Set([jid, number ? `${number}@s.whatsapp.net` : '', number])].filter(Boolean);
 }
 
+function normalizePhoneNumber(value, defaultCountryCode = '91') {
+  const raw = String(value || '').trim().toLowerCase();
+  const user = raw.includes('@') ? raw.split('@')[0] : raw;
+  const digits = user.replace(/[^0-9]/g, '');
+  if (!digits) return '';
+  if (digits.length === 10 && defaultCountryCode) return `${defaultCountryCode}${digits}`;
+  return digits;
+}
+
+async function resolveLidToPhoneNumber(sock, senderJid) {
+  const normalized = normalizeJid(senderJid);
+  if (!normalized.endsWith('@lid')) return '';
+
+  const mapping = sock?.signalRepository?.lidMapping || sock?.lidMapping;
+  for (const method of ['getPNForLID', 'getPnForLid']) {
+    if (typeof mapping?.[method] !== 'function') continue;
+    try {
+      const resolved = await mapping[method](normalized);
+      const phone = normalizePhoneNumber(resolved);
+      if (phone) return phone;
+    } catch {
+      // Try the available contact-store fallback below.
+    }
+  }
+
+  const contact = sock?.store?.contacts?.[normalized] || sock?.contacts?.[normalized];
+  return normalizePhoneNumber(contact?.jid || contact?.id || contact?.phoneNumber || contact?.phone || '');
+}
+
+function isAuthorizedAdmin({ senderJid, resolvedPhoneNumber = '', configuredJids = '', adminPhoneNumbers = '', ownerNumber = '' }) {
+  const normalizedJid = normalizeJid(senderJid);
+  const configuredJidSet = new Set(String(configuredJids || '').split(',').map(normalizeJid).filter(Boolean));
+  const jidMatched = configuredJidSet.has(normalizedJid);
+  const resolvedPhone = normalizePhoneNumber(resolvedPhoneNumber);
+  const configuredPhones = [adminPhoneNumbers, ownerNumber]
+    .flatMap((value) => String(value || '').split(','))
+    .map((value) => normalizePhoneNumber(value))
+    .filter(Boolean);
+  return {
+    authorized: jidMatched || configuredPhones.includes(resolvedPhone),
+    normalizedJid,
+    resolvedPhone,
+    jidMatched,
+    phoneMatched: configuredPhones.includes(resolvedPhone),
+  };
+}
+
 function isAdminCommand(text) {
   return /^(?:\/admin\s+(?:logs|status|statistics|stats|restart|shutdown|broadcast(?:\s|$)|maintenance(?:\s+(?:on|off))?)|nezuko\s+(?:logs|status|statistics|stats|restart|shutdown|broadcast(?:\s|$)|maintenance(?:\s+(?:on|off))?))(?:\s|$)/i.test(String(text || '').trim());
 }
@@ -240,6 +287,9 @@ function getBackoffDelay(attempt) {
 
 module.exports = {
   normalizeJid,
+  normalizePhoneNumber,
+  resolveLidToPhoneNumber,
+  isAuthorizedAdmin,
   isAdminCommand,
   isAuthorizedAdminJid,
   isGlobalCommand,

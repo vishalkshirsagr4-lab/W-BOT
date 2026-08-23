@@ -10,7 +10,9 @@ const {
   getBackoffDelay,
   isGlobalCommand,
   isAdminCommand,
-  isAuthorizedAdminJid,
+  normalizePhoneNumber,
+  resolveLidToPhoneNumber,
+  isAuthorizedAdmin,
 } = require('../src/bridge-utils');
 const FastApiClient = require('../src/fastapi');
 const WhatsAppBridge = require('../src/whatsapp-bridge');
@@ -97,9 +99,33 @@ test('admin commands support natural and slash syntax with lid and phone JIDs', 
   assert.equal(isAdminCommand('Nezuko logs'), true);
   assert.equal(isAdminCommand('/admin status'), true);
   assert.equal(isAdminCommand('hello Nezuko'), false);
-  assert.equal(isAuthorizedAdminJid('12345@lid', '12345@lid'), true);
-  assert.equal(isAuthorizedAdminJid('12345@s.whatsapp.net', '12345@lid'), true);
-  assert.equal(isAuthorizedAdminJid('99999@s.whatsapp.net', '12345@lid'), false);
+  assert.equal(isAuthorizedAdmin({ senderJid: '12345@lid', configuredJids: '12345@lid' }).jidMatched, true);
+  assert.equal(isAuthorizedAdmin({ senderJid: '12345@s.whatsapp.net', configuredJids: '12345@lid' }).jidMatched, false);
+  assert.equal(isAuthorizedAdmin({ senderJid: '99999@s.whatsapp.net', configuredJids: '12345@lid' }).jidMatched, false);
+});
+
+test('admin authorization resolves an LID to the configured Indian phone number', async () => {
+  const sock = { signalRepository: { lidMapping: { getPNForLID: async () => '8861591838@s.whatsapp.net' } } };
+  const resolved = await resolveLidToPhoneNumber(sock, '111892538339464@lid');
+  assert.equal(resolved, '918861591838');
+  assert.equal(normalizePhoneNumber('+91 8861-591838'), '918861591838');
+  const result = isAuthorizedAdmin({
+    senderJid: '111892538339464@lid',
+    resolvedPhoneNumber: resolved,
+    configuredJids: 'other@lid',
+    adminPhoneNumbers: '918861591838',
+    ownerNumber: '918861591838',
+  });
+  assert.equal(result.authorized, true);
+  assert.equal(result.jidMatched, false);
+  assert.equal(result.phoneMatched, true);
+});
+
+test('unmapped LIDs and unauthorized phone numbers are rejected', async () => {
+  const sock = { signalRepository: { lidMapping: { getPNForLID: async () => null } } };
+  assert.equal(await resolveLidToPhoneNumber(sock, '111892538339464@lid'), '');
+  assert.equal(isAuthorizedAdmin({ senderJid: '111892538339464@lid', configuredJids: 'other@lid', adminPhoneNumbers: '918861591838' }).authorized, false);
+  assert.equal(isAuthorizedAdmin({ senderJid: '9000000000@s.whatsapp.net', resolvedPhoneNumber: '9000000000', adminPhoneNumbers: '918861591838' }).authorized, false);
 });
 
 test('fromMe admin commands are the only self messages eligible for the narrow exception', () => {

@@ -38,10 +38,10 @@ class NezukoServiceTests(unittest.TestCase):
         self.assertEqual(extract_command("please help me"), "please help me")
 
     def test_owner_number_is_treated_as_admin(self) -> None:
-        self.assertTrue(is_authorized_admin("918660108587"))
+        self.assertTrue(is_authorized_admin("918861591838"))
 
     def test_formatted_phone_numbers_are_treated_as_admin(self) -> None:
-        self.assertTrue(is_authorized_admin("+91 8660 108587"))
+        self.assertTrue(is_authorized_admin("+91 8861 591838"))
 
     def test_gemini_service_uses_ai_api_key_fallback(self) -> None:
         with patch.dict(os.environ, {"AI_API_KEY": "shared-key"}, clear=False):

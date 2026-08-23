@@ -51,6 +51,8 @@ def is_authorized_admin(phone_number: str | None) -> bool:
             return ""
         cleaned = str(value).strip().lower()
         cleaned = re.sub(r"[^0-9]", "", cleaned)
+        if len(cleaned) == 10:
+            cleaned = f"91{cleaned}"
         return cleaned
 
     normalized = normalize(phone_number)

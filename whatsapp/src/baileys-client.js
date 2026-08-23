@@ -5,7 +5,7 @@ const { DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/bai
 const { getEnv, getIntEnv, getBoolEnv } = require('./config');
 const logger = require('./logger');
 const { generateQrDataUrl, generateQrPngBuffer, generateQrSvgBuffer, printQrToTerminal } = require('./qr-utils');
-const { createMessageDeduper, normalizeMessagePayload, shouldProcessMessage, isGlobalCommand, isAdminCommand, isAuthorizedAdminJid } = require('./bridge-utils');
+const { createMessageDeduper, normalizeMessagePayload, shouldProcessMessage, isGlobalCommand, isAdminCommand, resolveLidToPhoneNumber, isAuthorizedAdmin, normalizePhoneNumber } = require('./bridge-utils');
 const FastApiClient = require('./fastapi');
 
 class BaileysClient {
@@ -36,6 +36,8 @@ class BaileysClient {
     this.fastApi = new FastApiClient();
     this.allowSelfMessages = false;
     this.adminJids = getEnv('ADMIN_JIDS', '');
+    this.adminPhoneNumbers = getEnv('ADMIN_PHONE_NUMBERS', '');
+    this.ownerNumber = getEnv('OWNER_NUMBER', '');
     this.apiTimeoutMs = getIntEnv('FASTAPI_TIMEOUT_MS', 8000);
     this.messageDeduper = createMessageDeduper(getIntEnv('MESSAGE_DEDUP_TTL_MS', 60_000), getIntEnv('MESSAGE_DEDUP_MAX_ENTRIES', 5_000));
     this.recentOutboundMessages = new Map();
@@ -252,15 +254,32 @@ class BaileysClient {
         : message.key?.participant || message.key?.remoteJid || normalized.platform_id;
       const outboundKey = `${normalized.chat_id}:${String(normalized.message || '').trim().toLowerCase()}`;
       const isTrackedOutbound = fromMe && this.recentOutboundMessages.has(outboundKey);
-      const authorizedAdmin = isAuthorizedAdminJid(senderJid, this.adminJids);
+      const resolvedPhoneNumber = await resolveLidToPhoneNumber(this.sock, senderJid);
+      const authorization = isAuthorizedAdmin({
+        senderJid,
+        resolvedPhoneNumber,
+        configuredJids: this.adminJids,
+        adminPhoneNumbers: this.adminPhoneNumbers,
+        ownerNumber: this.ownerNumber,
+      });
+      const authorizedAdmin = authorization.authorized;
       const fromMeAdminCommand = Boolean(fromMe && adminCommand && authorizedAdmin && !isTrackedOutbound);
       normalized.sender_jid = senderJid;
+      normalized.resolved_phone_number = authorization.resolvedPhone || normalizePhoneNumber(normalized.phone_number);
       if (adminCommand) {
         logger.info({ chatId: normalized.chat_id, fromMe: Boolean(message.key?.fromMe) }, 'Admin command received');
         if (authorizedAdmin) {
           logger.info({ chatId: normalized.chat_id, fromMe: Boolean(message.key?.fromMe) }, fromMeAdminCommand ? 'fromMe admin command accepted' : 'Admin command authorized');
         } else {
-          logger.warn({ chatId: normalized.chat_id, senderJid }, 'Admin command rejected');
+          logger.warn({
+            chatId: normalized.chat_id,
+            senderJid,
+            normalizedJid: authorization.normalizedJid,
+            resolvedPhoneNumber: authorization.resolvedPhone,
+            configuredAdminNumbers: this.adminPhoneNumbers,
+            jidMatched: authorization.jidMatched,
+            phoneMatched: authorization.phoneMatched,
+          }, 'Admin command rejected');
         }
       }
       if (isRecognizedGlobalCommand) {
@@ -417,7 +436,7 @@ class BaileysClient {
     const fromMe = Boolean(normalized.fromMe);
     const forwardPayload = {
       platform_id: fromMe ? senderJid : (normalized.platform_id || normalized.chat_id || normalized.phone_number),
-      phone_number: fromMe ? String(senderJid).split('@')[0] : (normalized.phone_number || normalized.platform_id || ''),
+      phone_number: normalized.resolved_phone_number || (fromMe ? String(senderJid).split('@')[0] : (normalized.phone_number || normalized.platform_id || '')),
       sender_name: normalized.sender_name || '',
       profile_name: normalized.profile_name || '',
       chat_id: normalized.chat_id,
