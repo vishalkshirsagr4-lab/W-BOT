@@ -24,15 +24,27 @@ function normalizePhoneNumber(value, defaultCountryCode = '91') {
   const digits = user.replace(/[^0-9]/g, '');
   if (!digits) return '';
   if (digits.length === 10 && defaultCountryCode) return `${defaultCountryCode}${digits}`;
-  // Baileys can return an India PN mapping with one legacy trailing zero.
-  // Only remove it when the remaining value is exactly a valid 91 + 10 digit number.
-  if (defaultCountryCode === '91' && /^91\d{10}0$/.test(digits)) return digits.slice(0, -1);
   return digits;
 }
 
-async function resolveLidToPhoneNumber(sock, senderJid) {
+function normalizePhoneForConfiguredMatch(value, configuredNumbers = [], defaultCountryCode = '91') {
+  const normalized = normalizePhoneNumber(value, defaultCountryCode);
+  const configured = configuredNumbers
+    .flatMap((item) => String(item || '').split(','))
+    .map((item) => normalizePhoneNumber(item, defaultCountryCode))
+    .filter(Boolean);
+
+  if (configured.includes(normalized)) return normalized;
+
+  // Some Baileys versions expose an India PN mapping with a legacy trailing 0.
+  // Correct it only when the candidate is exactly one digit longer than a configured number.
+  const corrected = configured.find((number) => normalized === `${number}0`);
+  return corrected || normalized;
+}
+
+async function resolveLidIdentity(sock, senderJid) {
   const normalized = normalizeJid(senderJid);
-  if (!normalized.endsWith('@lid')) return '';
+  if (!normalized.endsWith('@lid')) return { resolvedJid: '', phoneNumber: '' };
 
   const mapping = sock?.signalRepository?.lidMapping || sock?.lidMapping;
   for (const method of ['getPNForLID', 'getPnForLid']) {
@@ -40,21 +52,28 @@ async function resolveLidToPhoneNumber(sock, senderJid) {
     try {
       const resolved = await mapping[method](normalized);
       const phone = normalizePhoneNumber(resolved);
-      if (phone) return phone;
+      if (phone) return { resolvedJid: String(resolved), phoneNumber: phone };
     } catch {
       // Try the available contact-store fallback below.
     }
   }
 
   const contact = sock?.store?.contacts?.[normalized] || sock?.contacts?.[normalized];
-  return normalizePhoneNumber(contact?.jid || contact?.id || contact?.phoneNumber || contact?.phone || '');
+  const resolvedJid = contact?.jid || contact?.id || contact?.phoneNumber || contact?.phone || '';
+  return { resolvedJid: String(resolvedJid), phoneNumber: normalizePhoneNumber(resolvedJid) };
 }
 
-function isAuthorizedAdmin({ senderJid, resolvedPhoneNumber = '', configuredJids = '', adminPhoneNumbers = '', ownerNumber = '' }) {
+async function resolveLidToPhoneNumber(sock, senderJid) {
+  const identity = await resolveLidIdentity(sock, senderJid);
+  return identity.phoneNumber;
+}
+
+function isAuthorizedAdmin({ senderJid, resolvedPhoneNumber = '', resolvedJid = '', configuredJids = '', adminPhoneNumbers = '', ownerNumber = '' }) {
   const normalizedJid = normalizeJid(senderJid);
   const configuredJidSet = new Set(String(configuredJids || '').split(',').map(normalizeJid).filter(Boolean));
   const jidMatched = configuredJidSet.has(normalizedJid);
-  const resolvedPhone = normalizePhoneNumber(resolvedPhoneNumber);
+  const configuredNumbers = [adminPhoneNumbers, ownerNumber];
+  const resolvedPhone = normalizePhoneForConfiguredMatch(resolvedPhoneNumber, configuredNumbers);
   const configuredPhones = [adminPhoneNumbers, ownerNumber]
     .flatMap((value) => String(value || '').split(','))
     .map((value) => normalizePhoneNumber(value))
@@ -62,6 +81,7 @@ function isAuthorizedAdmin({ senderJid, resolvedPhoneNumber = '', configuredJids
   return {
     authorized: jidMatched || configuredPhones.includes(resolvedPhone),
     normalizedJid,
+    resolvedJid: normalizeJid(resolvedJid || resolvedPhoneNumber),
     resolvedPhone,
     jidMatched,
     phoneMatched: configuredPhones.includes(resolvedPhone),
@@ -291,7 +311,9 @@ function getBackoffDelay(attempt) {
 module.exports = {
   normalizeJid,
   normalizePhoneNumber,
+  normalizePhoneForConfiguredMatch,
   resolveLidToPhoneNumber,
+  resolveLidIdentity,
   isAuthorizedAdmin,
   isAdminCommand,
   isAuthorizedAdminJid,

@@ -11,7 +11,9 @@ const {
   isGlobalCommand,
   isAdminCommand,
   normalizePhoneNumber,
+  normalizePhoneForConfiguredMatch,
   resolveLidToPhoneNumber,
+  resolveLidIdentity,
   isAuthorizedAdmin,
 } = require('../src/bridge-utils');
 const FastApiClient = require('../src/fastapi');
@@ -106,6 +108,9 @@ test('admin commands support natural and slash syntax with lid and phone JIDs', 
 
 test('admin authorization resolves an LID to the configured Indian phone number', async () => {
   const sock = { signalRepository: { lidMapping: { getPNForLID: async () => '8861591838@s.whatsapp.net' } } };
+  const identity = await resolveLidIdentity(sock, '111892538339464@lid');
+  assert.equal(identity.resolvedJid, '8861591838@s.whatsapp.net');
+  assert.equal(identity.phoneNumber, '918861591838');
   const resolved = await resolveLidToPhoneNumber(sock, '111892538339464@lid');
   assert.equal(resolved, '918861591838');
   assert.equal(normalizePhoneNumber('+91 8861-591838'), '918861591838');
@@ -129,7 +134,8 @@ test('admin authorization matches the Baileys trailing-zero resolver result', ()
     adminPhoneNumbers: '918861591838',
     ownerNumber: '',
   });
-  assert.equal(normalizePhoneNumber('9188615918380'), '918861591838');
+  assert.equal(normalizePhoneNumber('9188615918380'), '9188615918380');
+  assert.equal(normalizePhoneForConfiguredMatch('9188615918380', ['918861591838']), '918861591838');
   assert.equal(result.phoneMatched, true);
   assert.equal(result.authorized, true);
 });

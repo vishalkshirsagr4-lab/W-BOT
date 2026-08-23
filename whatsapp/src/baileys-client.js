@@ -5,7 +5,7 @@ const { DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/bai
 const { getEnv, getIntEnv, getBoolEnv } = require('./config');
 const logger = require('./logger');
 const { generateQrDataUrl, generateQrPngBuffer, generateQrSvgBuffer, printQrToTerminal } = require('./qr-utils');
-const { createMessageDeduper, normalizeMessagePayload, shouldProcessMessage, isGlobalCommand, isAdminCommand, resolveLidToPhoneNumber, isAuthorizedAdmin, normalizePhoneNumber } = require('./bridge-utils');
+const { createMessageDeduper, normalizeMessagePayload, shouldProcessMessage, isGlobalCommand, isAdminCommand, resolveLidIdentity, isAuthorizedAdmin, normalizePhoneNumber } = require('./bridge-utils');
 const FastApiClient = require('./fastapi');
 
 class BaileysClient {
@@ -254,10 +254,12 @@ class BaileysClient {
         : message.key?.participant || message.key?.remoteJid || normalized.platform_id;
       const outboundKey = `${normalized.chat_id}:${String(normalized.message || '').trim().toLowerCase()}`;
       const isTrackedOutbound = fromMe && this.recentOutboundMessages.has(outboundKey);
-      const resolvedPhoneNumber = await resolveLidToPhoneNumber(this.sock, senderJid);
+      const resolvedIdentity = await resolveLidIdentity(this.sock, senderJid);
+      const resolvedPhoneNumber = resolvedIdentity.phoneNumber;
       const authorization = isAuthorizedAdmin({
         senderJid,
         resolvedPhoneNumber,
+        resolvedJid: resolvedIdentity.resolvedJid,
         configuredJids: this.adminJids,
         adminPhoneNumbers: this.adminPhoneNumbers,
         ownerNumber: this.ownerNumber,
@@ -275,8 +277,11 @@ class BaileysClient {
             chatId: normalized.chat_id,
             senderJid,
             normalizedJid: authorization.normalizedJid,
+            resolvedJid: resolvedIdentity.resolvedJid,
             resolvedPhoneNumber: authorization.resolvedPhone,
+            normalizedResolvedPhone: authorization.resolvedPhone,
             configuredAdminNumbers: this.adminPhoneNumbers,
+            configuredOwnerNumber: this.ownerNumber,
             jidMatched: authorization.jidMatched,
             phoneMatched: authorization.phoneMatched,
           }, 'Admin command rejected');
