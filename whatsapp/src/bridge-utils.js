@@ -20,10 +20,13 @@ function jidVariants(value) {
 
 function normalizePhoneNumber(value, defaultCountryCode = '91') {
   const raw = String(value || '').trim().toLowerCase();
-  const user = raw.includes('@') ? raw.split('@')[0] : raw;
+  const user = (raw.includes('@') ? raw.split('@')[0] : raw).split(':')[0];
   const digits = user.replace(/[^0-9]/g, '');
   if (!digits) return '';
   if (digits.length === 10 && defaultCountryCode) return `${defaultCountryCode}${digits}`;
+  // Baileys can return an India PN mapping with one legacy trailing zero.
+  // Only remove it when the remaining value is exactly a valid 91 + 10 digit number.
+  if (defaultCountryCode === '91' && /^91\d{10}0$/.test(digits)) return digits.slice(0, -1);
   return digits;
 }
 

@@ -121,6 +121,24 @@ test('admin authorization resolves an LID to the configured Indian phone number'
   assert.equal(result.phoneMatched, true);
 });
 
+test('admin authorization matches the Baileys trailing-zero resolver result', () => {
+  const result = isAuthorizedAdmin({
+    senderJid: '111892538339464@lid',
+    resolvedPhoneNumber: '9188615918380',
+    configuredJids: '',
+    adminPhoneNumbers: '918861591838',
+    ownerNumber: '',
+  });
+  assert.equal(normalizePhoneNumber('9188615918380'), '918861591838');
+  assert.equal(result.phoneMatched, true);
+  assert.equal(result.authorized, true);
+});
+
+test('phone normalization removes JID and device formatting without truncating other numbers', () => {
+  assert.equal(normalizePhoneNumber('+91 8861-591838@s.whatsapp.net:78'), '918861591838');
+  assert.equal(normalizePhoneNumber('4412345678900'), '4412345678900');
+});
+
 test('unmapped LIDs and unauthorized phone numbers are rejected', async () => {
   const sock = { signalRepository: { lidMapping: { getPNForLID: async () => null } } };
   assert.equal(await resolveLidToPhoneNumber(sock, '111892538339464@lid'), '');
