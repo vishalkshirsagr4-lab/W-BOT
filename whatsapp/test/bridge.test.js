@@ -124,6 +124,7 @@ test('admin authorization resolves an LID to the configured Indian phone number'
   assert.equal(result.authorized, true);
   assert.equal(result.jidMatched, false);
   assert.equal(result.phoneMatched, true);
+  assert.equal(result.ownerMatched, true);
 });
 
 test('admin authorization matches the Baileys trailing-zero resolver result', () => {
@@ -137,7 +138,28 @@ test('admin authorization matches the Baileys trailing-zero resolver result', ()
   assert.equal(normalizePhoneNumber('9188615918380'), '9188615918380');
   assert.equal(normalizePhoneForConfiguredMatch('9188615918380', ['918861591838']), '918861591838');
   assert.equal(result.phoneMatched, true);
+  assert.equal(result.ownerMatched, false);
   assert.equal(result.authorized, true);
+});
+
+test('owner matching is separate and the bot number is not implicitly an admin', () => {
+  const ownerResult = isAuthorizedAdmin({
+    senderJid: '8861591838@s.whatsapp.net',
+    resolvedPhoneNumber: '8861591838',
+    configuredJids: '',
+    adminPhoneNumbers: '',
+    ownerNumber: '+91 8861 591838',
+  });
+  const botResult = isAuthorizedAdmin({
+    senderJid: '918660108587:78@s.whatsapp.net',
+    resolvedPhoneNumber: '918660108587:78@s.whatsapp.net',
+    configuredJids: '',
+    adminPhoneNumbers: '918861591838',
+    ownerNumber: '918861591838',
+  });
+  assert.equal(ownerResult.ownerMatched, true);
+  assert.equal(ownerResult.authorized, true);
+  assert.equal(botResult.authorized, false);
 });
 
 test('phone normalization removes JID and device formatting without truncating other numbers', () => {

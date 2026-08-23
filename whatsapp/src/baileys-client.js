@@ -36,7 +36,7 @@ class BaileysClient {
     this.fastApi = new FastApiClient();
     this.allowSelfMessages = false;
     this.adminJids = getEnv('ADMIN_JIDS', '');
-    this.adminPhoneNumbers = getEnv('ADMIN_PHONE_NUMBERS', '');
+    this.adminPhoneNumbers = getEnv('ADMIN_PHONE_NUMBERS', getEnv('ADMIN_PHONE_NUMBER', ''));
     this.ownerNumber = getEnv('OWNER_NUMBER', '');
     this.apiTimeoutMs = getIntEnv('FASTAPI_TIMEOUT_MS', 8000);
     this.messageDeduper = createMessageDeduper(getIntEnv('MESSAGE_DEDUP_TTL_MS', 60_000), getIntEnv('MESSAGE_DEDUP_MAX_ENTRIES', 5_000));
@@ -269,22 +269,25 @@ class BaileysClient {
       normalized.sender_jid = senderJid;
       normalized.resolved_phone_number = authorization.resolvedPhone || normalizePhoneNumber(normalized.phone_number);
       if (adminCommand) {
-        logger.info({ chatId: normalized.chat_id, fromMe: Boolean(message.key?.fromMe) }, 'Admin command received');
+        const authorizationLog = {
+          chatId: normalized.chat_id,
+          senderJid,
+          normalizedJid: authorization.normalizedJid,
+          resolvedJid: resolvedIdentity.resolvedJid,
+          resolvedPhoneNumber,
+          normalizedResolvedPhone: authorization.resolvedPhone,
+          configuredAdminNumbers: this.adminPhoneNumbers,
+          configuredOwnerNumber: this.ownerNumber,
+          jidMatched: authorization.jidMatched,
+          phoneMatched: authorization.phoneMatched,
+          ownerMatched: authorization.ownerMatched,
+          authorizationResult: authorizedAdmin,
+        };
+        logger.info(authorizationLog, 'Admin command received');
         if (authorizedAdmin) {
-          logger.info({ chatId: normalized.chat_id, fromMe: Boolean(message.key?.fromMe) }, fromMeAdminCommand ? 'fromMe admin command accepted' : 'Admin command authorized');
+          logger.info(authorizationLog, fromMeAdminCommand ? 'fromMe admin command accepted' : 'Admin command authorized');
         } else {
-          logger.warn({
-            chatId: normalized.chat_id,
-            senderJid,
-            normalizedJid: authorization.normalizedJid,
-            resolvedJid: resolvedIdentity.resolvedJid,
-            resolvedPhoneNumber: authorization.resolvedPhone,
-            normalizedResolvedPhone: authorization.resolvedPhone,
-            configuredAdminNumbers: this.adminPhoneNumbers,
-            configuredOwnerNumber: this.ownerNumber,
-            jidMatched: authorization.jidMatched,
-            phoneMatched: authorization.phoneMatched,
-          }, 'Admin command rejected');
+          logger.warn(authorizationLog, 'Admin command rejected');
         }
       }
       if (isRecognizedGlobalCommand) {

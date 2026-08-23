@@ -72,19 +72,27 @@ function isAuthorizedAdmin({ senderJid, resolvedPhoneNumber = '', resolvedJid = 
   const normalizedJid = normalizeJid(senderJid);
   const configuredJidSet = new Set(String(configuredJids || '').split(',').map(normalizeJid).filter(Boolean));
   const jidMatched = configuredJidSet.has(normalizedJid);
-  const configuredNumbers = [adminPhoneNumbers, ownerNumber];
-  const resolvedPhone = normalizePhoneForConfiguredMatch(resolvedPhoneNumber, configuredNumbers);
-  const configuredPhones = [adminPhoneNumbers, ownerNumber]
-    .flatMap((value) => String(value || '').split(','))
+  const configuredAdminPhones = String(adminPhoneNumbers || '')
+    .split(',')
     .map((value) => normalizePhoneNumber(value))
     .filter(Boolean);
+  const configuredOwnerPhones = String(ownerNumber || '')
+    .split(',')
+    .map((value) => normalizePhoneNumber(value))
+    .filter(Boolean);
+  const configuredNumbers = [configuredAdminPhones, configuredOwnerPhones];
+  const resolvedPhone = normalizePhoneForConfiguredMatch(resolvedPhoneNumber, configuredNumbers);
+  const configuredPhones = [...new Set([...configuredAdminPhones, ...configuredOwnerPhones])]
+  const phoneMatched = configuredAdminPhones.includes(resolvedPhone);
+  const ownerMatched = configuredOwnerPhones.includes(resolvedPhone);
   return {
-    authorized: jidMatched || configuredPhones.includes(resolvedPhone),
+    authorized: jidMatched || phoneMatched || ownerMatched,
     normalizedJid,
     resolvedJid: normalizeJid(resolvedJid || resolvedPhoneNumber),
     resolvedPhone,
     jidMatched,
-    phoneMatched: configuredPhones.includes(resolvedPhone),
+    phoneMatched,
+    ownerMatched,
   };
 }
 
