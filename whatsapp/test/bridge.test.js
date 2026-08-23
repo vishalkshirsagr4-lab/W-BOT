@@ -128,6 +128,8 @@ test('admin authorization resolves an LID to the configured Indian phone number'
 });
 
 test('admin authorization matches the Baileys trailing-zero resolver result', () => {
+  const resolvedIdentity = normalizePhoneForConfiguredMatch('9188615918380', ['918861591838']);
+  assert.equal(resolvedIdentity, '918861591838');
   const result = isAuthorizedAdmin({
     senderJid: '111892538339464@lid',
     resolvedPhoneNumber: '9188615918380',
@@ -140,6 +142,24 @@ test('admin authorization matches the Baileys trailing-zero resolver result', ()
   assert.equal(result.phoneMatched, true);
   assert.equal(result.ownerMatched, false);
   assert.equal(result.authorized, true);
+});
+
+test('resolveLidIdentity corrects only a configured trailing-zero mapping', async () => {
+  const sock = {
+    signalRepository: {
+      lidMapping: {
+        getPNForLID: async () => '9188615918380',
+      },
+    },
+  };
+  const identity = await resolveLidIdentity(
+    sock,
+    '111892538339464@lid',
+    ['918861591838', '918861591838'],
+  );
+
+  assert.equal(identity.resolvedJid, '9188615918380');
+  assert.equal(identity.phoneNumber, '918861591838');
 });
 
 test('owner matching is separate and the bot number is not implicitly an admin', () => {

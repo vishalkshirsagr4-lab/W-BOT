@@ -42,7 +42,7 @@ function normalizePhoneForConfiguredMatch(value, configuredNumbers = [], default
   return corrected || normalized;
 }
 
-async function resolveLidIdentity(sock, senderJid) {
+async function resolveLidIdentity(sock, senderJid, configuredPhoneNumbers = []) {
   const normalized = normalizeJid(senderJid);
   if (!normalized.endsWith('@lid')) return { resolvedJid: '', phoneNumber: '' };
 
@@ -51,7 +51,7 @@ async function resolveLidIdentity(sock, senderJid) {
     if (typeof mapping?.[method] !== 'function') continue;
     try {
       const resolved = await mapping[method](normalized);
-      const phone = normalizePhoneNumber(resolved);
+      const phone = normalizePhoneForConfiguredMatch(resolved, configuredPhoneNumbers);
       if (phone) return { resolvedJid: String(resolved), phoneNumber: phone };
     } catch {
       // Try the available contact-store fallback below.
@@ -60,7 +60,10 @@ async function resolveLidIdentity(sock, senderJid) {
 
   const contact = sock?.store?.contacts?.[normalized] || sock?.contacts?.[normalized];
   const resolvedJid = contact?.jid || contact?.id || contact?.phoneNumber || contact?.phone || '';
-  return { resolvedJid: String(resolvedJid), phoneNumber: normalizePhoneNumber(resolvedJid) };
+  return {
+    resolvedJid: String(resolvedJid),
+    phoneNumber: normalizePhoneForConfiguredMatch(resolvedJid, configuredPhoneNumbers),
+  };
 }
 
 async function resolveLidToPhoneNumber(sock, senderJid) {

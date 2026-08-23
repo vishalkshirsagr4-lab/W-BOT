@@ -254,8 +254,14 @@ class BaileysClient {
         : message.key?.participant || message.key?.remoteJid || normalized.platform_id;
       const outboundKey = `${normalized.chat_id}:${String(normalized.message || '').trim().toLowerCase()}`;
       const isTrackedOutbound = fromMe && this.recentOutboundMessages.has(outboundKey);
-      const resolvedIdentity = await resolveLidIdentity(this.sock, senderJid);
-      const resolvedPhoneNumber = resolvedIdentity.phoneNumber;
+      const resolvedIdentity = await resolveLidIdentity(
+        this.sock,
+        senderJid,
+        [this.adminPhoneNumbers, this.ownerNumber],
+      );
+      const resolvedPhoneNumber = normalizePhoneNumber(
+        resolvedIdentity.resolvedJid || resolvedIdentity.phoneNumber,
+      );
       const authorization = isAuthorizedAdmin({
         senderJid,
         resolvedPhoneNumber,
