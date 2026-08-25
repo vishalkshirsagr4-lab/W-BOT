@@ -209,9 +209,15 @@ class BaileysClient {
         return;
       }
 
+      const remoteJid = message.key?.remoteJid || '';
+      const isGroup = remoteJid.endsWith('@g.us');
+      const senderJid = message.key?.participant || message.key?.participantAlt || message.key?.senderPn || (!isGroup ? remoteJid : '');
       const normalized = normalizeMessagePayload({
-        from: message.key?.remoteJid,
-        chatId: message.key?.remoteJid,
+        from: remoteJid,
+        chatId: remoteJid,
+        senderJid,
+        isGroup,
+        id: message.key?.id,
         body: message.message?.conversation || message.message?.extendedTextMessage?.text || '',
         type: 'chat',
         timestamp: Date.now() / 1000,
@@ -229,6 +235,9 @@ class BaileysClient {
         normalized.isStatus = false;
         normalized.isBroadcast = false;
         normalized.isOwnMessage = normalized.fromMe;
+        normalized.sender_name = message.pushName || '';
+        normalized.quoted_message_key = message.key;
+        normalized.quoted_message_payload = message.message;
       }
 
       if (!normalized) {
@@ -249,21 +258,21 @@ class BaileysClient {
       const isRecognizedGlobalCommand = isGlobalCommand(normalized.message);
       const adminCommand = isAdminCommand(normalized.message);
       const fromMe = Boolean(message.key?.fromMe);
-      const senderJid = fromMe
+      const actualSenderJid = fromMe
         ? this.sock?.user?.id || normalized.platform_id
-        : message.key?.participant || message.key?.remoteJid || normalized.platform_id;
+        : message.key?.participant || message.key?.participantAlt || message.key?.senderPn || normalized.sender_jid;
       const outboundKey = `${normalized.chat_id}:${String(normalized.message || '').trim().toLowerCase()}`;
       const isTrackedOutbound = fromMe && this.recentOutboundMessages.has(outboundKey);
       const resolvedIdentity = await resolveLidIdentity(
         this.sock,
-        senderJid,
+        actualSenderJid,
         [this.adminPhoneNumbers, this.ownerNumber],
       );
       const resolvedPhoneNumber = normalizePhoneNumber(
         resolvedIdentity.resolvedJid || resolvedIdentity.phoneNumber,
       );
       const authorization = isAuthorizedAdmin({
-        senderJid,
+        senderJid: actualSenderJid,
         resolvedPhoneNumber,
         resolvedJid: resolvedIdentity.resolvedJid,
         configuredJids: this.adminJids,
@@ -272,12 +281,12 @@ class BaileysClient {
       });
       const authorizedAdmin = authorization.authorized;
       const fromMeAdminCommand = Boolean(fromMe && adminCommand && authorizedAdmin && !isTrackedOutbound);
-      normalized.sender_jid = senderJid;
+      normalized.sender_jid = actualSenderJid;
       normalized.resolved_phone_number = authorization.resolvedPhone || normalizePhoneNumber(normalized.phone_number);
       if (adminCommand) {
         const authorizationLog = {
           chatId: normalized.chat_id,
-          senderJid,
+          senderJid: actualSenderJid,
           normalizedJid: authorization.normalizedJid,
           resolvedJid: resolvedIdentity.resolvedJid,
           resolvedPhoneNumber,
@@ -455,6 +464,7 @@ class BaileysClient {
       profile_name: normalized.profile_name || '',
       chat_id: normalized.chat_id,
       message: normalized.message,
+      message_id: normalized.raw_message_id || null,
       timestamp: Math.floor(Date.now() / 1000),
       quoted_text: normalized.quoted_text || null,
       is_group: Boolean(normalized.is_group),
@@ -470,7 +480,13 @@ class BaileysClient {
 
       if (response?.status === 'success' && typeof response.reply === 'string' && response.reply.trim()) {
         const replyText = response.reply.trim();
-        await this.sendText(normalized.chat_id, replyText);
+        await this.sendText(normalized.chat_id, replyText, {
+          senderJid: response.sender_jid,
+          mentionSender: Boolean(response.is_group && response.mention_sender !== false),
+          quoted: normalized.is_group && normalized.quoted_message_key
+            ? { key: normalized.quoted_message_key, message: normalized.quoted_message_payload }
+            : undefined,
+        });
         return { status: 'success', reply: replyText };
       }
 
@@ -482,7 +498,7 @@ class BaileysClient {
     }
   }
 
-  async sendText(to, text) {
+  async sendText(to, text, options = {}) {
     if (!this.sock || !this.ready) {
       throw new Error('Baileys client is not ready');
     }
@@ -492,7 +508,12 @@ class BaileysClient {
     for (const [key, expiresAt] of this.recentOutboundMessages.entries()) {
       if (expiresAt <= Date.now()) this.recentOutboundMessages.delete(key);
     }
-    const result = await this.sock.sendMessage(to, { text });
+    const senderJid = options.senderJid;
+    const body = options.mentionSender && senderJid ? `@${String(senderJid).split('@')[0]} ${text}` : text;
+    const message = { text: body };
+    if (options.mentionSender && senderJid) message.mentions = [senderJid];
+    if (options.quoted?.key) message.quoted = options.quoted;
+    const result = await this.sock.sendMessage(to, message);
     logger.info({ to, messageLength: text.length, messageId: result?.key?.id || null }, 'Outbound Baileys text sent successfully');
     return result;
   }

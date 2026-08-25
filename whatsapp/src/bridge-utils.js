@@ -175,10 +175,11 @@ function normalizeMessagePayload(message, fallbackTimestamp = Math.floor(Date.no
     return normalizeWebhookPayload(message);
   }
 
-  const rawFrom = message.from || message.chatId || message.sender || '';
+  const rawChatId = message.chatId || message.from || message.chat?.id || '';
+  const isGroup = Boolean(message.isGroup || message.chat?.isGroup || message.isGroupMsg || String(rawChatId).endsWith('@g.us'));
+  const rawFrom = message.senderJid || message.sender_jid || message.sender || (!isGroup ? message.from : '');
   const from = String(rawFrom).replace(/@c\.us$/i, '').replace(/@s\.whatsapp\.net$/i, '');
-  const chatId = message.chatId || message.from || message.chat?.id || '';
-  const isGroup = Boolean(message.isGroup || message.chat?.isGroup || message.isGroupMsg);
+  const chatId = rawChatId;
   const timestamp = Number(message.timestamp ?? fallbackTimestamp);
   const rawBody = message.body || message.text || '';
   const quotedBody = message.quotedMsg?.body || message.quotedMsg?.text || message.quotedMessage?.body || '';
@@ -186,7 +187,7 @@ function normalizeMessagePayload(message, fallbackTimestamp = Math.floor(Date.no
   const messageType = message.type || 'chat';
 
   return {
-    platform_id: chatId || rawFrom,
+    platform_id: rawFrom || chatId,
     phone_number: from,
     sender_name: message.notifyName || message.senderName || '',
     profile_name: message.pushname || '',
@@ -204,6 +205,7 @@ function normalizeMessagePayload(message, fallbackTimestamp = Math.floor(Date.no
     is_group: isGroup,
     quoted_text: quotedBody,
     raw_message_id: message.id?._serialized || message.id || message._data?.id || `${chatId}:${timestamp}`,
+    sender_jid: normalizeJid(rawFrom),
   };
 }
 

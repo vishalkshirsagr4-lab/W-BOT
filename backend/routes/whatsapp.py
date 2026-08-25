@@ -12,7 +12,7 @@ from backend.ai.chat import generate_chat_response
 from backend.database.connection import get_db
 from backend.services.commands import handle_nezuko_command
 from backend.services.cricket_service import handle_cricket_request, is_cricket_request
-from backend.services.nezuko import is_authorized_admin, should_trigger_nezuko, sanitize_text
+from backend.services.nezuko import get_conversation_history, is_authorized_admin, is_message_processed, save_conversation_history, should_trigger_nezuko, sanitize_text
 from backend.services import download_manager
 from backend.services import tts_service
 from fastapi.responses import FileResponse
@@ -86,6 +86,8 @@ class WhatsAppMessagePayload(BaseModel):
 
     is_group: bool = Field(default=False)
     quoted_text: Optional[str] = Field(default=None)
+    sender_jid: Optional[str] = Field(default=None)
+    message_id: Optional[str] = Field(default=None)
 
 
 def _message_text(payload: WhatsAppMessagePayload) -> str:
@@ -649,6 +651,10 @@ async def receive_whatsapp_message(request: Request, payload: WhatsAppMessagePay
             logger.info("[WA][TIMING] decision_blocked_ms=%d", int((time.perf_counter() - started_at) * 1000))
             return {"status": "ignored", "reason": str(decision.get("reason") or "unknown")}
 
+        if await is_message_processed(db, payload.chat_id, payload.message_id):
+            logger.info("Duplicate WhatsApp message ignored before AI chat_id=%s message_id=%s", payload.chat_id, payload.message_id)
+            return {"status": "ignored", "reason": "duplicate_message"}
+
         if _is_command(text):
             command_result = await _handle_slash_command(request, db, payload, text)
             if command_result is not None:
@@ -667,14 +673,42 @@ async def receive_whatsapp_message(request: Request, payload: WhatsAppMessagePay
                 return {"status": "success", "reply": command_result["reply"]}
 
         step_started = time.perf_counter()
-        reply = await generate_chat_response(text, [])
+        history = await get_conversation_history(db, payload.chat_id, payload.phone_number)
+        formatted_history = []
+        for item in history:
+            content = item.get("content") or item.get("text") or ""
+            if is_group and item.get("role") == "user":
+                speaker = item.get("sender_name") or "Group member"
+                content = f"[{speaker}]: {content}"
+            elif is_group and item.get("role") == "assistant":
+                content = f"[Nezuko]: {content}"
+            formatted_history.append({"role": item.get("role", "user"), "parts": [content]})
+        reply = await generate_chat_response(text, formatted_history)
         reply = (str(reply) if reply is not None else "").strip()[:4000]
+        saved = await save_conversation_history(
+            db,
+            payload.chat_id,
+            payload.phone_number,
+            text,
+            reply,
+            message_id=payload.message_id,
+            sender_jid=payload.sender_jid or payload.platform_id,
+            sender_name=payload.sender_name or payload.profile_name,
+        )
+        logger.info("Conversation persisted chat_id=%s user_message_saved=%s assistant_response_saved=%s messages_count=%d", payload.chat_id, saved, saved, len(history) + 2)
         logger.info("[WA][TIMING] prompt_ms=%d", int((time.perf_counter() - step_started) * 1000))
         logger.info("[WA][TIMING] ai_total_ms=%d", int((time.perf_counter() - started_at) * 1000))
         logger.info("[WA][TIMING] response_format_ms=%d", int((time.perf_counter() - started_at) * 1000))
         logger.info("[WA][TIMING] total_ms=%d", int((time.perf_counter() - started_at) * 1000))
 
-        return {"status": "success", "reply": reply}
+        return {
+            "status": "success",
+            "reply": reply,
+            "chat_id": payload.chat_id,
+            "is_group": is_group,
+            "sender_jid": payload.sender_jid or payload.platform_id,
+            "mention_sender": is_group,
+        }
 
     except HTTPException:
         raise

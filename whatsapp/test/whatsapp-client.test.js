@@ -99,3 +99,43 @@ test('Baileys inbound messages start typing before the backend call and pause in
     { state: 'paused', jid: '919999999999@s.whatsapp.net' },
   ]);
 });
+
+test('group normalization keeps the actual participant separate from the group JID', () => {
+  const { normalizeMessagePayload } = require('../src/bridge-utils');
+
+  const normalized = normalizeMessagePayload({
+    chatId: '120363000000000000@g.us',
+    senderJid: '919888888888@s.whatsapp.net',
+    isGroup: true,
+    body: 'nezuko explain DBMS',
+    id: 'group-message-1',
+  });
+
+  assert.equal(normalized.chat_id, '120363000000000000@g.us');
+  assert.equal(normalized.sender_jid, '919888888888@s.whatsapp.net');
+  assert.equal(normalized.platform_id, '919888888888@s.whatsapp.net');
+  assert.equal(normalized.phone_number, '919888888888');
+});
+
+test('Baileys group replies include a real sender mention and quoted message', async () => {
+  const BaileysClient = require('../src/baileys-client');
+  const client = new BaileysClient();
+  let sentMessage;
+  client.ready = true;
+  client.sock = {
+    sendMessage: async (to, message) => {
+      sentMessage = { to, message };
+      return { key: { id: 'reply-1' } };
+    },
+  };
+
+  await client.sendText('120363000000000000@g.us', '🌸 DBMS is a database system.', {
+    senderJid: '919888888888@s.whatsapp.net',
+    mentionSender: true,
+    quoted: { key: { remoteJid: '120363000000000000@g.us', id: 'group-message-1' }, message: { conversation: 'nezuko explain DBMS' } },
+  });
+
+  assert.equal(sentMessage.message.text, '@919888888888 🌸 DBMS is a database system.');
+  assert.deepEqual(sentMessage.message.mentions, ['919888888888@s.whatsapp.net']);
+  assert.equal(sentMessage.message.quoted.key.id, 'group-message-1');
+});

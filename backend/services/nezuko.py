@@ -121,10 +121,35 @@ async def get_conversation_history(db: Any, chat_id: str, phone_number: str) -> 
         return []
 
 
-async def save_conversation_history(db: Any, chat_id: str, phone_number: str, user_message: str, reply: str) -> None:
+async def is_message_processed(db: Any, chat_id: str, message_id: str | None) -> bool:
+    """Check the conversation-level idempotency marker before invoking AI."""
+    if db is None or not chat_id or not message_id:
+        return False
+    try:
+        doc = await db["conversations"].find_one(
+            {"chat_id": chat_id, "processed_message_ids": message_id},
+            {"_id": 1},
+        )
+        return doc is not None
+    except Exception:
+        logger.exception("Failed to check processed message chat_id=%s", chat_id)
+        return False
+
+
+async def save_conversation_history(
+    db: Any,
+    chat_id: str,
+    phone_number: str,
+    user_message: str,
+    reply: str,
+    *,
+    message_id: str | None = None,
+    sender_jid: str | None = None,
+    sender_name: str | None = None,
+) -> bool:
     """Persist recent exchanges without allowing a chat document to grow forever."""
     if db is None:
-        return
+        return False
     try:
         now = int(time.time())
         expires_at = datetime.fromtimestamp(
@@ -133,29 +158,44 @@ async def save_conversation_history(db: Any, chat_id: str, phone_number: str, us
         )
         max_messages = max(2, int(getattr(settings, "CONVERSATION_MAX_MESSAGES", 200)))
         max_chars = max(1, int(getattr(settings, "CONVERSATION_MAX_MESSAGE_CHARS", 12000)))
-        await db["conversations"].update_one(
-            {"chat_id": chat_id},
-            {
-                "$set": {
-                    "phone_number": phone_number,
-                    "updated_at": now,
-                    "expires_at": expires_at,
-                    "context": "WhatsApp conversation",
-                },
-                "$push": {
-                    "messages": {
-                        "$each": [
-                            {"role": "user", "text": sanitize_text(user_message)[:max_chars], "timestamp": now},
-                            {"role": "assistant", "text": sanitize_text(reply)[:max_chars], "timestamp": now},
-                        ],
-                        "$slice": -max_messages,
-                    }
-                },
+        user_entry = {
+            "role": "user",
+            "content": sanitize_text(user_message)[:max_chars],
+            "text": sanitize_text(user_message)[:max_chars],
+            "timestamp": now,
+        }
+        if sender_jid:
+            user_entry["sender_jid"] = sender_jid
+        if sender_name:
+            user_entry["sender_name"] = sanitize_text(sender_name)[:200]
+        query = {"chat_id": chat_id}
+        if message_id:
+            query["processed_message_ids"] = {"$ne": message_id}
+        update = {
+            "$set": {
+                "phone_number": phone_number,
+                "updated_at": now,
+                "expires_at": expires_at,
+                "context": "WhatsApp conversation",
             },
+            "$push": {
+                "messages": {
+                    "$each": [user_entry, {"role": "assistant", "content": sanitize_text(reply)[:max_chars], "text": sanitize_text(reply)[:max_chars], "timestamp": now}],
+                    "$slice": -max_messages,
+                }
+            },
+        }
+        if message_id:
+            update["$addToSet"] = {"processed_message_ids": message_id}
+        result = await db["conversations"].update_one(
+            query,
+            update,
             upsert=True,
         )
+        return bool(result.acknowledged)
     except Exception:
         logger.exception("Failed to save conversation history chat_id=%s", chat_id)
+        return False
 
 
 async def clear_conversation_history(db: Any, chat_id: str) -> bool:
