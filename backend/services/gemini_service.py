@@ -29,7 +29,7 @@ class GeminiService:
             model
             or os.getenv("GEMINI_MODEL")
             or getattr(settings, "GEMINI_MODEL", None)
-            or "gemini-2.5-flash"
+            or "gemini-3.5-flash-lite"
         ).strip()
         self._client: Optional[Any] = None
 
