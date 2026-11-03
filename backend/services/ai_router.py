@@ -1,8 +1,6 @@
 import asyncio
 import logging
 import os
-import random
-import time
 from typing import Any, Optional
 
 from backend.services.gemini_service import GeminiService
@@ -12,10 +10,11 @@ logger = logging.getLogger(__name__)
 
 
 class AIRouter:
-    """Routes AI requests between Gemini and OpenRouter with retries and graceful fallback."""
+    """Use Gemini by default; only call OpenRouter when explicitly enabled."""
 
     def __init__(self) -> None:
         self.primary_provider = (os.getenv("PRIMARY_PROVIDER") or "gemini").strip().lower()
+        self.fallback_enabled = os.getenv("AI_FALLBACK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
         self.gemini = GeminiService()
         self.openrouter = OpenRouterService()
 
@@ -45,8 +44,12 @@ class AIRouter:
                 await asyncio.sleep(0.5)
                 continue
 
-        logger.warning("[Router] Switching to OpenRouter")
-        return await self._generate_with_openrouter(prompt, system_instruction=system_instruction, history=history)
+        if self.fallback_enabled:
+            logger.warning("[Router] Gemini unavailable; OpenRouter fallback is explicitly enabled")
+            return await self._generate_with_openrouter(prompt, system_instruction=system_instruction, history=history)
+
+        logger.warning("[Router] Gemini unavailable; paid fallback disabled")
+        return "🌸 Nezuko is temporarily busy. Please try again in a little while. 💖"
 
     async def _generate_with_openrouter(self, prompt: str, *, system_instruction: str, history: Optional[list[dict[str, Any]]] = None) -> str:
         try:
