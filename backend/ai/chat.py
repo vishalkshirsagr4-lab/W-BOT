@@ -65,7 +65,7 @@ You make conversations incredibly enjoyable, warm, and NEVER sound like a roboti
 def _configured_model_name() -> str:
     name = getattr(settings, "GEMINI_MODEL", None)
     if not name:
-        name = "gemini-2.5-flash"
+        name = "gemini-3.5-flash-lite"
     return str(name).strip()
 
 
