@@ -23,7 +23,7 @@ APScheduler>=3.10.4
 # AI & External Requests
 # Request the http2 extra so h2/httpcore-http2 support is installed when possible
 httpx[http2]>=0.27.0
-google-generativeai>=0.4.1
+google-genai>=1.0.0
 yt-dlp>=2025.1.0
 gTTS>=2.5.4
 
